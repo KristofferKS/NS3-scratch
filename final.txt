@@ -1,0 +1,1217 @@
+# ns-3 Simulation Tutorial - Part 5 of 5
+## Gossip Protocol, Interference & Final Project
+
+### Prerequisites
+Complete Parts 1-4 before starting this final section.
+
+### What You'll Learn
+- Gossip/epidemic protocol implementation
+- Interference zones and signal degradation
+- Path loss models
+- Complete integrated system
+- Final project combining all concepts
+
+---
+
+## Exercise 5.1: Basic Gossip Protocol
+
+### Goal
+Implement a gossip protocol where nodes forward messages probabilistically.
+
+### Code: `scratch/gossip-protocol.cc`
+```cpp
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/wifi-module.h"
+#include "ns3/mobility-module.h"
+
+using namespace ns3;
+
+NS_LOG_COMPONENT_DEFINE("GossipProtocol");
+
+struct GossipMessage
+{
+    uint32_t messageId;
+    uint32_t originNode;
+    uint32_t hopCount;
+    double timestamp;
+    char payload[64];
+};
+
+class GossipApp : public Application
+{
+public:
+    GossipApp();
+    virtual ~GossipApp();
+    
+    void Setup(uint16_t port, double gossipProb, uint32_t maxHops);
+    void InitiateGossip(std::string message);
+
+private:
+    virtual void StartApplication(void);
+    virtual void StopApplication(void);
+    
+    void HandleRead(Ptr<Socket> socket);
+    void ForwardGossip(GossipMessage msg);
+    bool ShouldForward(uint32_t messageId);
+    
+    Ptr<Socket> m_socket;
+    uint16_t m_port;
+    double m_gossipProb;
+    uint32_t m_maxHops;
+    std::set<uint32_t> m_seenMessages;
+    uint32_t m_messageCounter;
+};
+
+GossipApp::GossipApp()
+    : m_socket(0),
+      m_port(0),
+      m_gossipProb(0.8),
+      m_maxHops(10),
+      m_messageCounter(0)
+{
+}
+
+GossipApp::~GossipApp()
+{
+    m_socket = 0;
+}
+
+void GossipApp::Setup(uint16_t port, double gossipProb, uint32_t maxHops)
+{
+    m_port = port;
+    m_gossipProb = gossipProb;
+    m_maxHops = maxHops;
+}
+
+void GossipApp::StartApplication(void)
+{
+    m_socket = Socket::CreateSocket(GetNode(), UdpSocketFactory::GetTypeId());
+    m_socket->SetAllowBroadcast(true);
+    
+    InetSocketAddress local = InetSocketAddress(Ipv4Address::GetAny(), m_port);
+    m_socket->Bind(local);
+    m_socket->SetRecvCallback(MakeCallback(&GossipApp::HandleRead, this));
+}
+
+void GossipApp::StopApplication(void)
+{
+    if (m_socket)
+    {
+        m_socket->Close();
+    }
+    
+    NS_LOG_INFO("Node " << GetNode()->GetId() << " saw " 
+                << m_seenMessages.size() << " unique messages");
+}
+
+void GossipApp::InitiateGossip(std::string message)
+{
+    GossipMessage msg;
+    msg.messageId = m_messageCounter++;
+    msg.originNode = GetNode()->GetId();
+    msg.hopCount = 0;
+    msg.timestamp = Simulator::Now().GetSeconds();
+    strncpy(msg.payload, message.c_str(), sizeof(msg.payload) - 1);
+    msg.payload[sizeof(msg.payload) - 1] = '\0';
+    
+    m_seenMessages.insert(msg.messageId);
+    
+    NS_LOG_INFO("[" << Simulator::Now().GetSeconds() << "s] Node " 
+                << GetNode()->GetId() << " initiated gossip: \"" 
+                << msg.payload << "\" (ID: " << msg.messageId << ")");
+    
+    ForwardGossip(msg);
+}
+
+bool GossipApp::ShouldForward(uint32_t messageId)
+{
+    // Check if already seen
+    if (m_seenMessages.find(messageId) != m_seenMessages.end())
+    {
+        return false;
+    }
+    
+    // Probabilistic forwarding
+    Ptr<UniformRandomVariable> rand = CreateObject<UniformRandomVariable>();
+    return rand->GetValue() < m_gossipProb;
+}
+
+void GossipApp::ForwardGossip(GossipMessage msg)
+{
+    msg.hopCount++;
+    
+    if (msg.hopCount > m_maxHops)
+    {
+        NS_LOG_INFO("Node " << GetNode()->GetId() 
+                    << " dropping message " << msg.messageId 
+                    << " (max hops reached)");
+        return;
+    }
+    
+    Ptr<Packet> packet = Create<Packet>((uint8_t*)&msg, sizeof(msg));
+    
+    InetSocketAddress remote = InetSocketAddress(Ipv4Address("255.255.255.255"), m_port);
+    m_socket->SendTo(packet, 0, remote);
+    
+    NS_LOG_INFO("[" << Simulator::Now().GetSeconds() << "s] Node " 
+                << GetNode()->GetId() << " forwarding message " 
+                << msg.messageId << " (hop " << msg.hopCount << ")");
+}
+
+void GossipApp::HandleRead(Ptr<Socket> socket)
+{
+    Ptr<Packet> packet;
+    Address from;
+    
+    while ((packet = socket->RecvFrom(from)))
+    {
+        if (packet->GetSize() >= sizeof(GossipMessage))
+        {
+            GossipMessage msg;
+            packet->CopyData((uint8_t*)&msg, sizeof(msg));
+            
+            // Don't process if already seen
+            if (m_seenMessages.find(msg.messageId) != m_seenMessages.end())
+            {
+                continue;
+            }
+            
+            m_seenMessages.insert(msg.messageId);
+            
+            NS_LOG_INFO("[" << Simulator::Now().GetSeconds() << "s] Node " 
+                        << GetNode()->GetId() << " received gossip message " 
+                        << msg.messageId << " from origin " << msg.originNode 
+                        << " (hop " << msg.hopCount << "): \"" << msg.payload << "\"");
+            
+            // Decide whether to forward
+            if (ShouldForward(msg.messageId))
+            {
+                // Small random delay before forwarding
+                Ptr<UniformRandomVariable> delay = CreateObject<UniformRandomVariable>();
+                double delayTime = delay->GetValue(0.01, 0.1);
+                
+                Simulator::Schedule(Seconds(delayTime), &GossipApp::ForwardGossip, this, msg);
+            }
+        }
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    LogComponentEnable("GossipProtocol", LOG_LEVEL_INFO);
+    
+    uint32_t nNodes = 10;
+    double gossipProb = 0.8;
+    uint32_t maxHops = 5;
+    
+    // Create nodes
+    NodeContainer nodes;
+    nodes.Create(nNodes);
+    
+    // WiFi setup
+    YansWifiChannelHelper channel = YansWifiChannelHelper::Default();
+    YansWifiPhyHelper phy;
+    phy.SetChannel(channel.Create());
+    
+    WifiHelper wifi;
+    wifi.SetRemoteStationManager("ns3::AarfWifiManager");
+    
+    WifiMacHelper mac;
+    mac.SetType("ns3::AdhocWifiMac");
+    
+    NetDeviceContainer devices = wifi.Install(phy, mac, nodes);
+    
+    // Random positions
+    MobilityHelper mobility;
+    mobility.SetPositionAllocator("ns3::RandomRectanglePositionAllocator",
+                                  "X", StringValue("ns3::UniformRandomVariable[Min=0.0|Max=100.0]"),
+                                  "Y", StringValue("ns3::UniformRandomVariable[Min=0.0|Max=100.0]"));
+    mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+    mobility.Install(nodes);
+    
+    // Internet stack
+    InternetStackHelper stack;
+    stack.Install(nodes);
+    
+    Ipv4AddressHelper address;
+    address.SetBase("10.1.1.0", "255.255.255.0");
+    Ipv4InterfaceContainer interfaces = address.Assign(devices);
+    
+    // Install gossip apps
+    for (uint32_t i = 0; i < nodes.GetN(); i++)
+    {
+        Ptr<GossipApp> app = CreateObject<GossipApp>();
+        app->Setup(9, gossipProb, maxHops);
+        nodes.Get(i)->AddApplication(app);
+        app->SetStartTime(Seconds(0.0));
+        app->SetStopTime(Seconds(30.0));
+    }
+    
+    // Node 0 initiates gossip at t=1s
+    Ptr<GossipApp> app0 = DynamicCast<GossipApp>(nodes.Get(0)->GetApplication(0));
+    Simulator::Schedule(Seconds(1.0), &GossipApp::InitiateGossip, app0, 
+                       "Hello from Node 0!");
+    
+    // Node 5 initiates different gossip at t=5s
+    Ptr<GossipApp> app5 = DynamicCast<GossipApp>(nodes.Get(5)->GetApplication(0));
+    Simulator::Schedule(Seconds(5.0), &GossipApp::InitiateGossip, app5, 
+                       "News from Node 5!");
+    
+    Simulator::Stop(Seconds(30.0));
+    Simulator::Run();
+    Simulator::Destroy();
+    return 0;
+}
+```
+
+### Build and Run
+```bash
+./ns3 run gossip-protocol
+```
+
+### Key Concepts
+
+#### Gossip Protocol Features
+1. **Message Deduplication**: Track seen messages
+2. **Probabilistic Forwarding**: Forward with probability p
+3. **Hop Limit**: Prevent infinite propagation
+4. **Random Delays**: Avoid network congestion
+
+#### Gossip Parameters
+```cpp
+gossipProb = 0.8;   // 80% chance of forwarding
+maxHops = 5;        // Maximum 5 hops
+```
+
+### 📝 Exercise Task
+1. Change gossip probability to 0.6 and observe spread
+2. Create 15 nodes instead of 10
+3. Add message TTL (time-to-live)
+4. Track and print gossip propagation statistics
+
+---
+
+## Exercise 5.2: Interference Zones
+
+### Goal
+Create areas with interference that degrade communication quality.
+
+### Code: `scratch/interference-zones.cc`
+```cpp
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/wifi-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/propagation-module.h"
+
+using namespace ns3;
+
+NS_LOG_COMPONENT_DEFINE("InterferenceZones");
+
+class InterferenceZone
+{
+public:
+    InterferenceZone(Vector center, double radius, double attenuation)
+        : m_center(center), m_radius(radius), m_attenuation(attenuation)
+    {
+    }
+    
+    bool IsInZone(Vector position) const
+    {
+        double dx = position.x - m_center.x;
+        double dy = position.y - m_center.y;
+        double distance = std::sqrt(dx * dx + dy * dy);
+        return distance <= m_radius;
+    }
+    
+    double GetAttenuation() const { return m_attenuation; }
+    Vector GetCenter() const { return m_center; }
+    double GetRadius() const { return m_radius; }
+
+private:
+    Vector m_center;
+    double m_radius;
+    double m_attenuation;  // Additional loss in dB
+};
+
+class InterferenceModel : public PropagationLossModel
+{
+public:
+    static TypeId GetTypeId(void);
+    InterferenceModel();
+    
+    void AddInterferenceZone(Vector center, double radius, double attenuation);
+    
+private:
+    virtual double DoCalcRxPower(double txPowerDbm, 
+                                Ptr<MobilityModel> a, 
+                                Ptr<MobilityModel> b) const;
+    virtual int64_t DoAssignStreams(int64_t stream);
+    
+    std::vector<InterferenceZone> m_zones;
+    Ptr<PropagationLossModel> m_baseModel;
+};
+
+TypeId InterferenceModel::GetTypeId(void)
+{
+    static TypeId tid = TypeId("InterferenceModel")
+        .SetParent<PropagationLossModel>()
+        .SetGroupName("Propagation")
+        .AddConstructor<InterferenceModel>();
+    return tid;
+}
+
+InterferenceModel::InterferenceModel()
+{
+    m_baseModel = CreateObject<LogDistancePropagationLossModel>();
+}
+
+void InterferenceModel::AddInterferenceZone(Vector center, double radius, double attenuation)
+{
+    m_zones.push_back(InterferenceZone(center, radius, attenuation));
+    NS_LOG_INFO("Added interference zone at (" << center.x << ", " << center.y 
+                << ") with radius " << radius << "m and " 
+                << attenuation << "dB attenuation");
+}
+
+double InterferenceModel::DoCalcRxPower(double txPowerDbm,
+                                       Ptr<MobilityModel> a,
+                                       Ptr<MobilityModel> b) const
+{
+    // Start with base propagation loss
+    double rxPowerDbm = m_baseModel->CalcRxPower(txPowerDbm, a, b);
+    
+    Vector posA = a->GetPosition();
+    Vector posB = b->GetPosition();
+    
+    // Check if either node is in an interference zone
+    for (const auto& zone : m_zones)
+    {
+        if (zone.IsInZone(posA) || zone.IsInZone(posB))
+        {
+            rxPowerDbm -= zone.GetAttenuation();
+            
+            NS_LOG_DEBUG("Interference detected: " << zone.GetAttenuation() 
+                        << "dB additional loss");
+        }
+    }
+    
+    return rxPowerDbm;
+}
+
+int64_t InterferenceModel::DoAssignStreams(int64_t stream)
+{
+    return 0;
+}
+
+// Test application
+class TestApp : public Application
+{
+public:
+    TestApp();
+    virtual ~TestApp();
+    
+    void Setup(Ptr<Socket> socket, Address address, uint32_t packetSize,
+               uint32_t nPackets, DataRate dataRate);
+
+private:
+    virtual void StartApplication(void);
+    virtual void StopApplication(void);
+    
+    void SendPacket(void);
+    
+    Ptr<Socket> m_socket;
+    Address m_peer;
+    uint32_t m_packetSize;
+    uint32_t m_nPackets;
+    DataRate m_dataRate;
+    EventId m_sendEvent;
+    uint32_t m_packetsSent;
+};
+
+TestApp::TestApp()
+    : m_socket(0),
+      m_packetSize(0),
+      m_nPackets(0),
+      m_dataRate(0),
+      m_packetsSent(0)
+{
+}
+
+TestApp::~TestApp()
+{
+    m_socket = 0;
+}
+
+void TestApp::Setup(Ptr<Socket> socket, Address address, uint32_t packetSize,
+                   uint32_t nPackets, DataRate dataRate)
+{
+    m_socket = socket;
+    m_peer = address;
+    m_packetSize = packetSize;
+    m_nPackets = nPackets;
+    m_dataRate = dataRate;
+}
+
+void TestApp::StartApplication(void)
+{
+    m_packetsSent = 0;
+    m_socket->Bind();
+    m_socket->Connect(m_peer);
+    SendPacket();
+}
+
+void TestApp::StopApplication(void)
+{
+    if (m_sendEvent.IsRunning())
+    {
+        Simulator::Cancel(m_sendEvent);
+    }
+    
+    if (m_socket)
+    {
+        m_socket->Close();
+    }
+}
+
+void TestApp::SendPacket(void)
+{
+    Ptr<Packet> packet = Create<Packet>(m_packetSize);
+    m_socket->Send(packet);
+    
+    if (++m_packetsSent < m_nPackets)
+    {
+        Time tNext(Seconds(m_packetSize * 8 / static_cast<double>(m_dataRate.GetBitRate())));
+        m_sendEvent = Simulator::Schedule(tNext, &TestApp::SendPacket, this);
+    }
+}
+
+void RxCallback(Ptr<Socket> socket)
+{
+    Ptr<Packet> packet;
+    while ((packet = socket->Recv()))
+    {
+        NS_LOG_INFO("Received packet of size " << packet->GetSize() 
+                    << " at time " << Simulator::Now().GetSeconds());
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    LogComponentEnable("InterferenceZones", LOG_LEVEL_INFO);
+    
+    // Create nodes
+    NodeContainer nodes;
+    nodes.Create(4);
+    
+    // WiFi with custom propagation model
+    YansWifiChannelHelper channel;
+    channel.SetPropagationDelay("ns3::ConstantSpeedPropagationDelayModel");
+    
+    // Create custom interference model
+    Ptr<InterferenceModel> interferenceModel = CreateObject<InterferenceModel>();
+    
+    // Add interference zones
+    interferenceModel->AddInterferenceZone(Vector(50.0, 50.0, 0.0), 20.0, 15.0);  // Center
+    interferenceModel->AddInterferenceZone(Vector(0.0, 100.0, 0.0), 15.0, 20.0);  // Top-left
+    
+    channel.AddPropagationLoss(interferenceModel);
+    
+    YansWifiPhyHelper phy;
+    phy.SetChannel(channel.Create());
+    
+    WifiHelper wifi;
+    wifi.SetRemoteStationManager("ns3::AarfWifiManager");
+    
+    WifiMacHelper mac;
+    mac.SetType("ns3::AdhocWifiMac");
+    
+    NetDeviceContainer devices = wifi.Install(phy, mac, nodes);
+    
+    // Position nodes
+    MobilityHelper mobility;
+    Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator>();
+    positionAlloc->Add(Vector(0.0, 0.0, 0.0));      // Node 0: Outside zones
+    positionAlloc->Add(Vector(50.0, 50.0, 0.0));    // Node 1: In center zone
+    positionAlloc->Add(Vector(100.0, 0.0, 0.0));    // Node 2: Outside zones
+    positionAlloc->Add(Vector(0.0, 100.0, 0.0));    // Node 3: In top-left zone
+    
+    mobility.SetPositionAllocator(positionAlloc);
+    mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+    mobility.Install(nodes);
+    
+    // Internet stack
+    InternetStackHelper stack;
+    stack.Install(nodes);
+    
+    Ipv4AddressHelper address;
+    address.SetBase("10.1.1.0", "255.255.255.0");
+    Ipv4InterfaceContainer interfaces = address.Assign(devices);
+    
+    // Set up traffic: Node 0 -> Node 1 (into interference zone)
+    uint16_t port = 9;
+    
+    Ptr<Socket> recvSocket = Socket::CreateSocket(nodes.Get(1), UdpSocketFactory::GetTypeId());
+    InetSocketAddress local = InetSocketAddress(Ipv4Address::GetAny(), port);
+    recvSocket->Bind(local);
+    recvSocket->SetRecvCallback(MakeCallback(&RxCallback));
+    
+    Ptr<Socket> sendSocket = Socket::CreateSocket(nodes.Get(0), UdpSocketFactory::GetTypeId());
+    InetSocketAddress remote = InetSocketAddress(interfaces.GetAddress(1), port);
+    
+    Ptr<TestApp> app = CreateObject<TestApp>();
+    app->Setup(sendSocket, remote, 1024, 20, DataRate("1Mbps"));
+    nodes.Get(0)->AddApplication(app);
+    app->SetStartTime(Seconds(1.0));
+    app->SetStopTime(Seconds(10.0));
+    
+    // Print node positions and zones
+    std::cout << "\n=== Node Positions ===" << std::endl;
+    for (uint32_t i = 0; i < nodes.GetN(); i++)
+    {
+        Ptr<MobilityModel> mob = nodes.Get(i)->GetObject<MobilityModel>();
+        Vector pos = mob->GetPosition();
+        std::cout << "Node " << i << ": (" << pos.x << ", " << pos.y << ")" << std::endl;
+    }
+    
+    std::cout << "\n=== Interference Zones ===" << std::endl;
+    std::cout << "Zone 1: Center (50, 50), radius 20m, 15dB loss" << std::endl;
+    std::cout << "Zone 2: Top-left (0, 100), radius 15m, 20dB loss" << std::endl;
+    
+    Simulator::Stop(Seconds(10.0));
+    Simulator::Run();
+    Simulator::Destroy();
+    return 0;
+}
+```
+
+### Build and Run
+```bash
+./ns3 run interference-zones
+```
+
+### Key Concepts
+
+#### Custom Propagation Loss Model
+```cpp
+class InterferenceModel : public PropagationLossModel
+{
+    virtual double DoCalcRxPower(double txPowerDbm,
+                                Ptr<MobilityModel> a,
+                                Ptr<MobilityModel> b) const;
+};
+```
+
+#### Interference Zones
+- Defined by center, radius, and attenuation
+- Additional signal loss in dB when nodes are in zone
+- Can have multiple zones with different properties
+
+### 📝 Exercise Task
+1. Add 3 more interference zones
+2. Create moving nodes that enter/exit zones
+3. Track packet loss rate in vs out of zones
+4. Visualize zones in NetAnim (use colored circles)
+
+---
+
+## Exercise 5.3: Final Project - Complete System
+
+### Goal
+Integrate everything: mobile nodes with waypoints, gossip protocol, broadcasting, interference zones.
+
+### Code: `scratch/final-project.cc`
+```cpp
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/wifi-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/netanim-module.h"
+
+using namespace ns3;
+
+NS_LOG_COMPONENT_DEFINE("FinalProject");
+
+// Message types
+enum MessageType
+{
+    BEACON = 1,           // Mobile node beacon
+    RESPONSE = 2,         // Static node response
+    GOSSIP = 3           // Gossip message
+};
+
+struct MessageHeader
+{
+    uint8_t type;
+    uint32_t nodeId;
+    uint32_t messageId;
+    double x, y;
+    double timestamp;
+    uint32_t hopCount;
+    char payload[128];
+};
+
+class CompleteSystemApp : public Application
+{
+public:
+    CompleteSystemApp();
+    virtual ~CompleteSystemApp();
+    
+    void Setup(uint16_t port, bool isMobile, double beaconInterval, 
+               double gossipProb, uint32_t maxHops);
+    void InitiateGossip(std::string message);
+
+private:
+    virtual void StartApplication(void);
+    virtual void StopApplication(void);
+    
+    void SendBeacon(void);
+    void SendResponse(uint32_t targetNode, Address targetAddress);
+    void ForwardGossip(MessageHeader msg);
+    void HandleRead(Ptr<Socket> socket);
+    bool ShouldForwardGossip(uint32_t messageId);
+    
+    Ptr<Socket> m_socket;
+    uint16_t m_port;
+    bool m_isMobile;
+    double m_beaconInterval;
+    double m_gossipProb;
+    uint32_t m_maxHops;
+    EventId m_beaconEvent;
+    std::set<uint32_t> m_seenMessages;
+    uint32_t m_messageCounter;
+    std::map<uint32_t, uint32_t> m_detectionCount;
+};
+
+CompleteSystemApp::CompleteSystemApp()
+    : m_socket(0),
+      m_port(0),
+      m_isMobile(false),
+      m_beaconInterval(2.0),
+      m_gossipProb(0.8),
+      m_maxHops(10),
+      m_messageCounter(0)
+{
+}
+
+CompleteSystemApp::~CompleteSystemApp()
+{
+    m_socket = 0;
+}
+
+void CompleteSystemApp::Setup(uint16_t port, bool isMobile, double beaconInterval,
+                              double gossipProb, uint32_t maxHops)
+{
+    m_port = port;
+    m_isMobile = isMobile;
+    m_beaconInterval = beaconInterval;
+    m_gossipProb = gossipProb;
+    m_maxHops = maxHops;
+}
+
+void CompleteSystemApp::StartApplication(void)
+{
+    m_socket = Socket::CreateSocket(GetNode(), UdpSocketFactory::GetTypeId());
+    m_socket->SetAllowBroadcast(true);
+    
+    InetSocketAddress local = InetSocketAddress(Ipv4Address::GetAny(), m_port);
+    m_socket->Bind(local);
+    m_socket->SetRecvCallback(MakeCallback(&CompleteSystemApp::HandleRead, this));
+    
+    if (m_isMobile)
+    {
+        SendBeacon();
+    }
+}
+
+void CompleteSystemApp::StopApplication(void)
+{
+    if (m_beaconEvent.IsRunning())
+    {
+        Simulator::Cancel(m_beaconEvent);
+    }
+    
+    if (m_socket)
+    {
+        m_socket->Close();
+    }
+    
+    // Print statistics
+    if (m_isMobile)
+    {
+        std::cout << "\nMobile Node " << GetNode()->GetId() << " Statistics:" << std::endl;
+        std::cout << "  Detected by:" << std::endl;
+        for (auto& pair : m_detectionCount)
+        {
+            std::cout << "    Node " << pair.first << ": " << pair.second << " times" << std::endl;
+        }
+        std::cout << "  Saw " << m_seenMessages.size() << " unique gossip messages" << std::endl;
+    }
+}
+
+void CompleteSystemApp::SendBeacon(void)
+{
+    Ptr<MobilityModel> mobility = GetNode()->GetObject<MobilityModel>();
+    Vector pos = mobility->GetPosition();
+    
+    MessageHeader header;
+    header.type = BEACON;
+    header.nodeId = GetNode()->GetId();
+    header.messageId = 0;
+    header.x = pos.x;
+    header.y = pos.y;
+    header.timestamp = Simulator::Now().GetSeconds();
+    header.hopCount = 0;
+    strcpy(header.payload, "BEACON");
+    
+    Ptr<Packet> packet = Create<Packet>((uint8_t*)&header, sizeof(header));
+    
+    InetSocketAddress remote = InetSocketAddress(Ipv4Address("255.255.255.255"), m_port);
+    m_socket->SendTo(packet, 0, remote);
+    
+    NS_LOG_INFO("[" << Simulator::Now().GetSeconds() << "s] Mobile Node " 
+                << GetNode()->GetId() << " sent beacon from (" 
+                << pos.x << ", " << pos.y << ")");
+    
+    m_beaconEvent = Simulator::Schedule(Seconds(m_beaconInterval), 
+                                       &CompleteSystemApp::SendBeacon, this);
+}
+
+void CompleteSystemApp::SendResponse(uint32_t targetNode, Address targetAddress)
+{
+    Ptr<MobilityModel> mobility = GetNode()->GetObject<MobilityModel>();
+    Vector pos = mobility->GetPosition();
+    
+    MessageHeader header;
+    header.type = RESPONSE;
+    header.nodeId = GetNode()->GetId();
+    header.messageId = 0;
+    header.x = pos.x;
+    header.y = pos.y;
+    header.timestamp = Simulator::Now().GetSeconds();
+    header.hopCount = 0;
+    strcpy(header.payload, "RESPONSE");
+    
+    Ptr<Packet> packet = Create<Packet>((uint8_t*)&header, sizeof(header));
+    m_socket->SendTo(packet, 0, targetAddress);
+    
+    NS_LOG_INFO("[" << Simulator::Now().GetSeconds() << "s] Static Node " 
+                << GetNode()->GetId() << " sent response to Node " << targetNode);
+}
+
+void CompleteSystemApp::InitiateGossip(std::string message)
+{
+    MessageHeader header;
+    header.type = GOSSIP;
+    header.nodeId = GetNode()->GetId();
+    header.messageId = m_messageCounter++;
+    
+    Ptr<MobilityModel> mobility = GetNode()->GetObject<MobilityModel>();
+    Vector pos = mobility->GetPosition();
+    header.x = pos.x;
+    header.y = pos.y;
+    header.timestamp = Simulator::Now().GetSeconds();
+    header.hopCount = 0;
+    strncpy(header.payload, message.c_str(), sizeof(header.payload) - 1);
+    header.payload[sizeof(header.payload) - 1] = '\0';
+    
+    uint32_t fullId = (header.nodeId << 16) | header.messageId;
+    m_seenMessages.insert(fullId);
+    
+    NS_LOG_INFO("[" << Simulator::Now().GetSeconds() << "s] Node " 
+                << GetNode()->GetId() << " initiated gossip: \"" 
+                << header.payload << "\"");
+    
+    ForwardGossip(header);
+}
+
+bool CompleteSystemApp::ShouldForwardGossip(uint32_t messageId)
+{
+    if (m_seenMessages.find(messageId) != m_seenMessages.end())
+    {
+        return false;
+    }
+    
+    Ptr<UniformRandomVariable> rand = CreateObject<UniformRandomVariable>();
+    return rand->GetValue() < m_gossipProb;
+}
+
+void CompleteSystemApp::ForwardGossip(MessageHeader header)
+{
+    header.hopCount++;
+    
+    if (header.hopCount > m_maxHops)
+    {
+        return;
+    }
+    
+    Ptr<Packet> packet = Create<Packet>((uint8_t*)&header, sizeof(header));
+    
+    InetSocketAddress remote = InetSocketAddress(Ipv4Address("255.255.255.255"), m_port);
+    m_socket->SendTo(packet, 0, remote);
+    
+    NS_LOG_INFO("[" << Simulator::Now().GetSeconds() << "s] Node " 
+                << GetNode()->GetId() << " forwarded gossip (hop " 
+                << header.hopCount << ")");
+}
+
+void CompleteSystemApp::HandleRead(Ptr<Socket> socket)
+{
+    Ptr<Packet> packet;
+    Address from;
+    
+    while ((packet = socket->RecvFrom(from)))
+    {
+        if (packet->GetSize() >= sizeof(MessageHeader))
+        {
+            MessageHeader header;
+            packet->CopyData((uint8_t*)&header, sizeof(header));
+            
+            if (header.nodeId == GetNode()->GetId())
+                continue;
+            
+            Ptr<MobilityModel> mobility = GetNode()->GetObject<MobilityModel>();
+            Vector myPos = mobility->GetPosition();
+            
+            if (header.type == BEACON && !m_isMobile)
+            {
+                // Static node detected mobile node beacon
+                double distance = std::sqrt(std::pow(myPos.x - header.x, 2) + 
+                                          std::pow(myPos.y - header.y, 2));
+                
+                NS_LOG_INFO("[" << Simulator::Now().GetSeconds() << "s] Static Node " 
+                            << GetNode()->GetId() << " detected Mobile Node " 
+                            << header.nodeId << " at distance " << distance << "m");
+                
+                SendResponse(header.nodeId, from);
+            }
+            else if (header.type == RESPONSE && m_isMobile)
+            {
+                // Mobile node received response
+                m_detectionCount[header.nodeId]++;
+                
+                NS_LOG_INFO("[" << Simulator::Now().GetSeconds() << "s] Mobile Node " 
+                            << GetNode()->GetId() << " received response from Static Node " 
+                            << header.nodeId);
+            }
+            else if (header.type == GOSSIP)
+            {
+                // Handle gossip message
+                uint32_t fullId = (header.nodeId << 16) | header.messageId;
+                
+                if (m_seenMessages.find(fullId) != m_seenMessages.end())
+                {
+                    continue;
+                }
+                
+                m_seenMessages.insert(fullId);
+                
+                NS_LOG_INFO("[" << Simulator::Now().GetSeconds() << "s] Node " 
+                            << GetNode()->GetId() << " received gossip from Node " 
+                            << header.nodeId << " (hop " << header.hopCount 
+                            << "): \"" << header.payload << "\"");
+                
+                if (ShouldForwardGossip(fullId))
+                {
+                    Ptr<UniformRandomVariable> delay = CreateObject<UniformRandomVariable>();
+                    double delayTime = delay->GetValue(0.01, 0.1);
+                    
+                    Simulator::Schedule(Seconds(delayTime), 
+                                      &CompleteSystemApp::ForwardGossip, this, header);
+                }
+            }
+        }
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    LogComponentEnable("FinalProject", LOG_LEVEL_INFO);
+    
+    // Parameters
+    uint32_t nStaticNodes = 5;
+    uint32_t nMobileNodes = 3;
+    double simTime = 60.0;
+    
+    // Create nodes
+    NodeContainer staticNodes;
+    staticNodes.Create(nStaticNodes);
+    
+    NodeContainer mobileNodes;
+    mobileNodes.Create(nMobileNodes);
+    
+    NodeContainer allNodes;
+    allNodes.Add(staticNodes);
+    allNodes.Add(mobileNodes);
+    
+    // WiFi setup
+    YansWifiChannelHelper channel = YansWifiChannelHelper::Default();
+    YansWifiPhyHelper phy;
+    phy.SetChannel(channel.Create());
+    
+    WifiHelper wifi;
+    wifi.SetRemoteStationManager("ns3::AarfWifiManager");
+    
+    WifiMacHelper mac;
+    mac.SetType("ns3::AdhocWifiMac");
+    
+    NetDeviceContainer devices = wifi.Install(phy, mac, allNodes);
+    
+    // Static nodes in a pentagon
+    MobilityHelper staticMobility;
+    Ptr<ListPositionAllocator> staticPos = CreateObject<ListPositionAllocator>();
+    double radius = 50.0;
+    for (uint32_t i = 0; i < nStaticNodes; i++)
+    {
+        double angle = 2.0 * M_PI * i / nStaticNodes;
+        double x = radius * std::cos(angle);
+        double y = radius * std::sin(angle);
+        staticPos->Add(Vector(x, y, 0.0));
+    }
+    
+    staticMobility.SetPositionAllocator(staticPos);
+    staticMobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+    staticMobility.Install(staticNodes);
+    
+    // Mobile nodes with waypoint paths
+    for (uint32_t i = 0; i < nMobileNodes; i++)
+    {
+        Ptr<WaypointMobilityModel> waypoint = CreateObject<WaypointMobilityModel>();
+        mobileNodes.Get(i)->AggregateObject(waypoint);
+        
+        // Create custom path for each mobile node
+        double startX = -60.0 + i * 30.0;
+        double startY = -60.0;
+        waypoint->SetPosition(Vector(startX, startY, 0.0));
+        
+        // Add waypoints (create a path through the network)
+        double time = 1.0;
+        double speed = 5.0;
+        
+        std::vector<Vector> path = {
+            Vector(startX, 0.0, 0.0),
+            Vector(0.0, startY + 60.0, 0.0),
+            Vector(-startX, 0.0, 0.0),
+            Vector(0.0, -startY - 60.0, 0.0),
+            Vector(startX, startY, 0.0)
+        };
+        
+        Vector currentPos = Vector(startX, startY, 0.0);
+        for (const auto& waypoint_pos : path)
+        {
+            double distance = CalculateDistance(currentPos, waypoint_pos);
+            time += distance / speed;
+            waypoint->AddWaypoint(Waypoint(Seconds(time), waypoint_pos));
+            currentPos = waypoint_pos;
+        }
+    }
+    
+    // Internet stack
+    InternetStackHelper stack;
+    stack.Install(allNodes);
+    
+    Ipv4AddressHelper address;
+    address.SetBase("10.1.1.0", "255.255.255.0");
+    Ipv4InterfaceContainer interfaces = address.Assign(devices);
+    
+    // Install applications on static nodes
+    for (uint32_t i = 0; i < staticNodes.GetN(); i++)
+    {
+        Ptr<CompleteSystemApp> app = CreateObject<CompleteSystemApp>();
+        app->Setup(9, false, 0, 0.7, 5);  // static, no beacons, gossip enabled
+        staticNodes.Get(i)->AddApplication(app);
+        app->SetStartTime(Seconds(0.0));
+        app->SetStopTime(Seconds(simTime));
+    }
+    
+    // Install applications on mobile nodes
+    for (uint32_t i = 0; i < mobileNodes.GetN(); i++)
+    {
+        Ptr<CompleteSystemApp> app = CreateObject<CompleteSystemApp>();
+        app->Setup(9, true, 2.0, 0.7, 5);  // mobile, beacon every 2s, gossip enabled
+        mobileNodes.Get(i)->AddApplication(app);
+        app->SetStartTime(Seconds(1.0));
+        app->SetStopTime(Seconds(simTime));
+    }
+    
+    // Initiate gossip messages
+    Ptr<CompleteSystemApp> gossipNode = DynamicCast<CompleteSystemApp>(
+        staticNodes.Get(0)->GetApplication(0));
+    Simulator::Schedule(Seconds(5.0), &CompleteSystemApp::InitiateGossip, 
+                       gossipNode, "Important network update!");
+    
+    Ptr<CompleteSystemApp> gossipNode2 = DynamicCast<CompleteSystemApp>(
+        mobileNodes.Get(0)->GetApplication(0));
+    Simulator::Schedule(Seconds(15.0), &CompleteSystemApp::InitiateGossip, 
+                       gossipNode2, "Mobile node discovery!");
+    
+    // Animation
+    AnimationInterface anim("final-project.xml");
+    
+    // Color nodes
+    for (uint32_t i = 0; i < staticNodes.GetN(); i++)
+    {
+        anim.UpdateNodeDescription(staticNodes.Get(i), "Base-" + std::to_string(i));
+        anim.UpdateNodeColor(staticNodes.Get(i), 0, 0, 255);  // Blue
+        anim.UpdateNodeSize(staticNodes.Get(i)->GetId(), 4.0, 4.0);
+    }
+    
+    for (uint32_t i = 0; i < mobileNodes.GetN(); i++)
+    {
+        anim.UpdateNodeDescription(mobileNodes.Get(i), "Mobile-" + std::to_string(i));
+        anim.UpdateNodeColor(mobileNodes.Get(i), 255, 0, 0);  // Red
+        anim.UpdateNodeSize(mobileNodes.Get(i)->GetId(), 3.0, 3.0);
+    }
+    
+    Simulator::Stop(Seconds(simTime));
+    Simulator::Run();
+    Simulator::Destroy();
+    
+    std::cout << "\n=== Simulation Complete ===" << std::endl;
+    std::cout << "Animation file: final-project.xml" << std::endl;
+    
+    return 0;
+}
+```
+
+### Build and Run
+```bash
+./ns3 run final-project
+```
+
+### What This Final Project Includes
+
+✅ **Static base stations** in pentagon formation  
+✅ **Mobile nodes** following custom waypoint paths  
+✅ **Beacon broadcasting** from mobile nodes  
+✅ **Automatic responses** from static nodes  
+✅ **Gossip protocol** for message dissemination  
+✅ **Network visualization** with NetAnim  
+✅ **Statistics tracking** for detections and gossip spread  
+
+### 📝 Final Challenge Tasks
+1. Add 3 interference zones at strategic locations
+2. Implement message prioritization (urgent vs normal)
+3. Add battery simulation for mobile nodes
+4. Create a web-based visualization of results
+5. Implement node failure and recovery
+
+---
+
+## Summary of Part 5 & Complete Tutorial
+
+### What You've Learned in Part 5
+✅ Gossip/epidemic protocols  
+✅ Custom propagation loss models  
+✅ Interference zones  
+✅ Complete system integration  
+✅ Advanced mobility with waypoints  
+✅ Multi-protocol communication  
+
+### Complete Tutorial Achievement 🎉
+
+You now know how to build ns-3 simulations with:
+
+**Fundamentals (Part 1)**
+- ns-3 structure and basics
+- Node creation and networking
+- UDP/TCP communication
+- Packet tracing
+
+**WiFi & Topology (Part 2)**
+- WiFi networks (Ad-hoc, AP, STA)
+- Custom applications
+- Multi-node topologies
+- Network visualization
+
+**Mobility (Part 3)**
+- Random walk/waypoint
+- Custom waypoint paths
+- Range detection
+- Mixed static/mobile networks
+
+**Broadcasting (Part 4)**
+- Broadcast protocols
+- Range-aware communication
+- Beacon and response systems
+- Discovery protocols
+
+**Advanced Integration (Part 5)**
+- Gossip protocols
+- Interference modeling
+- Complete systems
+- Real-world scenarios
+
+---
+
+## Next Steps & Resources
+
+### Further Learning
+1. **ns-3 Documentation**: https://www.nsnam.org/documentation/
+2. **ns-3 Tutorial**: https://www.nsnam.org/docs/tutorial/html/
+3. **ns-3 Examples**: Check `examples/` directory
+4. **Research Papers**: Look for papers using ns-3
+
+### Project Ideas
+- **Disaster Response Network**: Mobile rescue teams with base stations
+- **Smart City Monitoring**: Sensors, gateways, and mobile collectors
+- **Drone Swarm Communication**: Multiple UAVs with gossip coordination
+- **Vehicle Networks (VANET)**: Cars, road infrastructure, broadcasting
+- **IoT Mesh Network**: Sensors with multi-hop routing
+
+### Advanced Topics to Explore
+- Energy models (battery simulation)
+- Different routing protocols (AODV, OLSR, DSR)
+- TCP congestion control
+- LTE/5G simulation
+- Network security simulations
+- Machine learning integration
+
+---
+
+## Troubleshooting Guide
+
+### Common Issues
+
+**Build Errors**
+```bash
+./ns3 clean
+./ns3 configure
+./ns3 build
+```
+
+**Missing Dependencies**
+```bash
+sudo apt install g++ python3 cmake git
+```
+
+**Simulation Crashes**
+- Check node IDs are valid
+- Verify all nodes have mobility models
+- Ensure proper timing (apps start after nodes initialized)
+
+**No Output**
+- Enable logging: `LogComponentEnable("AppName", LOG_LEVEL_INFO);`
+- Check application start/stop times
+- Verify IP addresses assigned correctly
+
+---
+
+## Congratulations! 🎊
+
+You've completed the comprehensive ns-3 tutorial! You can now:
+- Design complex network topologies
+- Implement custom protocols
+- Simulate mobile networks
+- Model real-world scenarios
+- Analyze network performance
+
+Keep experimenting and building amazing simulations!
+
+---
+
+**End of Tutorial**
