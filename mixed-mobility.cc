@@ -207,7 +207,7 @@ int main(int argc, char *argv[])
     uint32_t nNodes = 5;
     
     CommandLine cmd;
-    cmd.AddValue("nNodes", "Number of static nodes", nNodes);
+    // cmd.AddValue("nNodes", "Number of static nodes", nNodes);
     cmd.AddValue("range", "Communication range in meters", commRange);
     cmd.AddValue("simTime", "Simulation time in seconds", simTime);
     cmd.AddValue("nMobileNodes", "Number of mobile nodes", nMobileNodes);
