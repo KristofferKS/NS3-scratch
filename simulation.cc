@@ -360,7 +360,7 @@ public:
     GossipApp();
     virtual ~GossipApp();
 
-    void Setup(double range, uint16_t port, double percentage);
+    void Setup(double range, uint16_t port, double percentage, uint32_t nCameraNodes);
     void SetupLogDir(std::string logDir);
     
     // Message generator configuration
@@ -385,6 +385,7 @@ private:
     std::vector<uint32_t> m_peers;
     std::ofstream m_logFile;
     double m_percentage;
+    uint32_t m_nCameraNodes;
     
     // Message generator
     Ptr<MessageGenerator> m_messageGenerator;
@@ -431,11 +432,12 @@ GossipApp::~GossipApp()
     m_socket = 0;
 }
 
-void GossipApp::Setup(double range, uint16_t port, double percentage)
+void GossipApp::Setup(double range, uint16_t port, double percentage, uint32_t nCameraNodes)
 {
     m_commRange = range;
     m_port = port;
-    m_percentage = percentage;  // Add this
+    m_percentage = percentage;
+    m_nCameraNodes = nCameraNodes;
 }
 
 void GossipApp::SetupLogDir(std::string logDir)
@@ -494,7 +496,7 @@ void GossipApp::DiscoverPeers(void)
 
     m_peers.clear();
     
-    for (uint32_t i = 0; i < NodeList::GetNNodes(); ++i)
+    for (uint32_t i = 0; i < m_nCameraNodes; ++i)
     {
         if (i == myId) continue;
 
@@ -833,7 +835,7 @@ GossipApp::ReceivePacket(Ptr<Socket> socket)
 class GossipAppHelper
 {
 public:
-    GossipAppHelper(double range = 50.0, uint16_t port = 9, std::string logDir = "", double percentage = 0.5);
+    GossipAppHelper(double range = 50.0, uint16_t port = 9, std::string logDir = "", double percentage = 0.5, uint32_t nCameraNodes = 50);
     
     // Set message generator parameters
     void SetMessageGenerator(float minDensity, 
@@ -850,6 +852,7 @@ private:
     double m_range;
     uint16_t m_port;
     std::string m_logDir;
+    uint32_t m_nCameraNodes;
     
     // Message generator parameters
     float m_minDensity;
@@ -860,11 +863,12 @@ private:
     bool m_useMessageGenerator;
 };
 
-GossipAppHelper::GossipAppHelper(double range, uint16_t port, std::string logDir, double percentage)
-    : m_range(range), 
+GossipAppHelper::GossipAppHelper(double range, uint16_t port, std::string logDir, double percentage, uint32_t nCameraNodes)
+    : m_percentage(percentage),
+      m_range(range), 
       m_port(port),
       m_logDir(logDir),
-      m_percentage(percentage),
+      m_nCameraNodes(nCameraNodes),
       m_minDensity(0.0f),
       m_maxDensity(100.0f),
       m_deltaDensity(10.0f),
@@ -903,7 +907,7 @@ ApplicationContainer
 GossipAppHelper::Install(Ptr<Node> node)
 {
     Ptr<GossipApp> app = CreateObject<GossipApp>();
-    app->Setup(m_range, m_port, m_percentage);
+    app->Setup(m_range, m_port, m_percentage, m_nCameraNodes);
     app->SetupLogDir(m_logDir);
     
     if (m_useMessageGenerator)
@@ -1137,7 +1141,7 @@ int main(int argc, char *argv[])
     // Configuration parameters
     uint32_t nNodes = 4;
     double commRange = 50.0;
-    double simTime = 5;
+    double simTime = 20;
     
     // Message generator parameters
     float minDensity = 0.0f;
@@ -1171,7 +1175,7 @@ int main(int argc, char *argv[])
 
     // Build network
     NodeContainer camera_nodes = CreateCameraNodes();
-    //NodeContainer mobile_nodes = CreateMobileNodes();
+    NodeContainer mobile_nodes = CreateMobileNodes();
     NetDeviceContainer devices = WifiStack(camera_nodes);
 
     // Get current date and time
@@ -1187,7 +1191,7 @@ int main(int argc, char *argv[])
     std::filesystem::create_directories(logDir);
 
     // Install gossip application with message generator
-    GossipAppHelper gossipApp(commRange, 9 , logDir, percentage);
+    GossipAppHelper gossipApp(commRange, 9 , logDir, percentage, camera_nodes.GetN());
     gossipApp.SetMessageGenerator(minDensity, maxDensity, deltaDensity,
                                   Seconds(minInterval), Seconds(maxInterval));
     
@@ -1208,3 +1212,27 @@ int main(int argc, char *argv[])
     Simulator::Destroy();
     return 0;
 }
+
+
+/*
+I DiscoverPeers bruger vi NodeList::GetNNodes()
+denne returnerer det totale antal noder i simuleringen dva staiske + mobiel
+den bruges 7 gange i filen VI SKAL SPECIFICERE dette skal specificeres til enten statisk
+
+Det vil altså sige at m_peers indeholder indexerne på på statiske og mobiel nod
+og nPeers for antallet af både statiske og mobiel noder.
+
+Tænker at dette kan rettes op på ved at ændre NodeList::GetNNodes() til specificere node type
+Eller også skal der laves en check i DiscoverPeers for at sikre at kun statiske noder tilføjes til m_peers
+eller også skal der laves en check i OnMessagGenerated og ReceiveFromDevice for at sikre at kun statiske noder modtager og sender beskeder
+
+kan man ikke bare iterere over camera_nodes i stedet for NodeList::GetNNodes()?????
+
+rettet....
+definerede m_nCameraNodes i GossipApp og gossipAppHelper og satte den i Setup og brugte den i DiscoverPeers i stedet for NodeList::GetNNodes()
+Der forsøges nu ikke at sende beskeder til mobile, og der tabes ikke pakker på det.
+
+Burde dog også ændres de andre steder hvor NodeList::GetNNodes() bruges.
+
+
+*/
