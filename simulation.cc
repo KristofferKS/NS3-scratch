@@ -168,10 +168,7 @@ public:
 
     void Stop()
     {
-        if (!m_running)
-        {
-            return;
-        }
+        if (!m_running){return;}
 
         m_running = false;
         
@@ -193,10 +190,7 @@ public:
 private:
     void GenerateMessage()
     {
-        if (!m_running)
-        {
-            return;
-        }
+        if (!m_running){return;}
 
         // Generate new density value
         float newDensity = GenerateNewDensity();
@@ -208,8 +202,8 @@ private:
         // Create message
         m_lastMessage = DensityMessage(m_nodeId, newDensity, timestamp);
 
-        NS_LOG_INFO("Node " << m_nodeId << " generated message: density=" 
-                    << newDensity << ", timestamp=" << timestamp << "ms");
+        //NS_LOG_INFO("Node " << m_nodeId << " generated message: density=" 
+        //            << newDensity << ", timestamp=" << timestamp << "ms");
 
         // Invoke callback if set
         if (!m_messageCallback.IsNull())
@@ -321,7 +315,7 @@ private:
     Ptr<Socket> m_socket;
     double m_commRange;
     uint16_t m_port;
-    std::vector<Ipv4Address> m_peers;
+    std::vector<uint32_t> m_peers;
     std::ofstream m_logFile;
     
     // Message generator
@@ -400,7 +394,11 @@ Mac48Address GossipApp::GetMacFromIpv4(const Ipv4Address& ip)
                     {
                         // Found the node and interface
                         Ptr<NetDevice> dev = node->GetDevice(j);
-                        return Mac48Address::ConvertFrom(dev->GetAddress());
+                        Mac48Address mac = Mac48Address::ConvertFrom(dev->GetAddress());
+                        // Avoid returning all-zero MAC
+                        if (mac != Mac48Address("00:00:00:00:00:00")) {
+                            return mac;
+                        }
                     }
                 }
             }
@@ -410,8 +408,7 @@ Mac48Address GossipApp::GetMacFromIpv4(const Ipv4Address& ip)
     return Mac48Address("ff:ff:ff:ff:ff:ff");
 }
 
-void
-GossipApp::DiscoverPeers(void)
+void GossipApp::DiscoverPeers(void)
 {
     uint32_t myId = GetNode()->GetId();
     Ptr<MobilityModel> myMob = GetNode()->GetObject<MobilityModel>();
@@ -431,12 +428,7 @@ GossipApp::DiscoverPeers(void)
         
         if (dist <= m_commRange)
         {
-            Ptr<Ipv4> ipv4 = peerNode->GetObject<Ipv4>();
-            if (ipv4 && ipv4->GetNInterfaces() > 1)
-            {
-                Ipv4Address peerAddr = ipv4->GetAddress(1, 0).GetLocal();
-                m_peers.push_back(peerAddr);
-            }
+            m_peers.push_back(i); // Store node index directly
         }
     }
 
@@ -448,15 +440,6 @@ GossipApp::DiscoverPeers(void)
 void
 GossipApp::StartApplication(void)
 {
-    /*
-    // Create and bind UDP socket
-    if (!m_socket)
-    {
-        m_socket = Socket::CreateSocket(GetNode(), UdpSocketFactory::GetTypeId());
-        m_socket->Bind(InetSocketAddress(Ipv4Address::GetAny(), m_port));
-        m_socket->SetRecvCallback(MakeCallback(&GossipApp::ReceivePacket, this));
-    }*/
-
     // Open log file for this node
     std::string fname = "gossip_log_node" + std::to_string(GetNode()->GetId()) + ".csv";
     m_logFile.open(fname, std::ios::out);
@@ -476,8 +459,12 @@ GossipApp::StartApplication(void)
     if (m_messageGeneratorConfigured)
     {
         uint32_t nodeId = GetNode()->GetId();
-        m_messageGenerator->Setup(nodeId, m_minDensity, m_maxDensity, m_deltaDensity,
-                                 m_minInterval, m_maxInterval);
+        m_messageGenerator->Setup(nodeId, 
+                                    m_minDensity, 
+                                    m_maxDensity, 
+                                    m_deltaDensity,
+                                    m_minInterval, 
+                                    m_maxInterval);
         
         // Set callback for when messages are generated
         m_messageGenerator->SetMessageGeneratedCallback(
@@ -500,14 +487,13 @@ bool GossipApp::ReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packe
 
     DensityMessage message = DensityMessage::Deserialize(buffer);
     delete[] buffer;
-/*
-    NS_LOG_INFO("Node " << myId << " received MAC packet from "
-                << Mac48Address::ConvertFrom(src) << " (source node=" << message.nodeId
-                << ", density=" << message.reading.density
-                << ", timestamp=" << message.reading.timestamp << "ms)");*/
 
     m_logFile << "recv," << now << "," << message.nodeId << "," << myId << ","
               << message.reading.density << "," << message.reading.timestamp << std::endl;
+    
+     NS_LOG_INFO("Node " << myId << " received message from node " << message.nodeId
+                 << " (density=" << message.reading.density
+                 << ", timestamp=" << message.reading.timestamp << " ms) at " << now << "s");
 
     return true; // Indicate packet was handled
 }
@@ -528,23 +514,34 @@ GossipApp::StopApplication(void)
     }
 }
 
-void
-GossipApp::OnMessageGenerated(const DensityMessage& message)
+void GossipApp::OnMessageGenerated(const DensityMessage& message)
 {
     NS_LOG_INFO("Node " << GetNode()->GetId() 
                 << " received new message from generator: density=" 
                 << message.reading.density << ", timestamp=" 
                 << message.reading.timestamp << "ms");
 
-    // Replace SendMessage with SendPacket for all peers
     Ptr<Node> node = GetNode();
     for (uint32_t i = 0; i < node->GetNDevices(); ++i)
     {
         Ptr<NetDevice> dev = node->GetDevice(i);
-        //Mac48Address srcMac = Mac48Address::ConvertFrom(dev->GetAddress());
-        for (const auto& peerAddr : m_peers)
+        // Only use WiFiNetDevice
+        if (DynamicCast<WifiNetDevice>(dev) == nullptr)
+            continue;
+
+        for (const auto& peerIndex : m_peers)
         {
-            Mac48Address dstMac = GetMacFromIpv4(peerAddr);
+            Ptr<Node> peerNode = NodeList::GetNode(peerIndex);
+            Ptr<NetDevice> peerDev;
+            for (uint32_t j = 0; j < peerNode->GetNDevices(); ++j) {
+                if (DynamicCast<WifiNetDevice>(peerNode->GetDevice(j)) != nullptr) {
+                    peerDev = peerNode->GetDevice(j);
+                    break;
+                }
+            }
+            if (!peerDev) continue; // No WiFi device found, skip
+
+            Mac48Address dstMac = Mac48Address::ConvertFrom(peerDev->GetAddress());
             SendMessage(dev, dstMac, message);
         }
     }
@@ -622,8 +619,11 @@ public:
     GossipAppHelper(double range = 50.0, uint16_t port = 9);
     
     // Set message generator parameters
-    void SetMessageGenerator(float minDensity, float maxDensity, 
-                            float deltaDensity, Time minInterval, Time maxInterval);
+    void SetMessageGenerator(float minDensity, 
+                                float maxDensity, 
+                                float deltaDensity, 
+                                Time minInterval, 
+                                Time maxInterval);
     
     ApplicationContainer Install(NodeContainer c);
     ApplicationContainer Install(Ptr<Node> node);
@@ -653,9 +653,11 @@ GossipAppHelper::GossipAppHelper(double range, uint16_t port)
 {
 }
 
-void
-GossipAppHelper::SetMessageGenerator(float minDensity, float maxDensity, 
-                                     float deltaDensity, Time minInterval, Time maxInterval)
+void GossipAppHelper::SetMessageGenerator(float minDensity, 
+                                            float maxDensity, 
+                                            float deltaDensity, 
+                                            Time minInterval, 
+                                            Time maxInterval)
 {
     m_minDensity = minDensity;
     m_maxDensity = maxDensity;
@@ -684,8 +686,11 @@ GossipAppHelper::Install(Ptr<Node> node)
     
     if (m_useMessageGenerator)
     {
-        app->SetupMessageGenerator(m_minDensity, m_maxDensity, m_deltaDensity,
-                                  m_minInterval, m_maxInterval);
+        app->SetupMessageGenerator(m_minDensity, 
+                                    m_maxDensity, 
+                                    m_deltaDensity,
+                                    m_minInterval, 
+                                    m_maxInterval);
     }
     
     node->AddApplication(app);
@@ -752,7 +757,6 @@ void SetCameraMobility(uint8_t node, NodeContainer& camera_nodes) {
 
     else{
         std::string command = "python3 /node_placement.py " + std::to_string(node) + " " + std::to_string(wifiRange) + " " + std::to_string(centerX) + " " + std::to_string(centerY) + " " + std::to_string(radius);
-        //system(command.c_str());
         // Read positions from file
         char buffer[128];
         FILE* pipe = popen(command.c_str(), "r");
@@ -765,8 +769,6 @@ void SetCameraMobility(uint8_t node, NodeContainer& camera_nodes) {
         }
 
         pclose(pipe);
-
-
         std::cout << "Python returned: " << placement << std::endl;
 
     }
@@ -783,7 +785,6 @@ void SetCameraMobility(uint8_t node, NodeContainer& camera_nodes) {
         std::cout << "Loaded node " << key << ": (" << x << ", " << y << ")\n";
     }
 
- 
     MobilityHelper CameraMobility;
     CameraMobility.SetPositionAllocator(listAlloc);
     CameraMobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
@@ -865,26 +866,6 @@ void TxCallback(Ptr<const Packet> packet)
     NS_LOG_UNCOND("Packet transmitted at " << Simulator::Now().GetSeconds() << "s: " << packet->GetSize() << " bytes");
 }
 
-/*
-void SendPacket(Ptr<NetDevice> dev, Mac48Address dst)
-{
-    NS_LOG_UNCOND("SendPacket() called at " << Simulator::Now().GetSeconds() << "s");
-
-    Ptr<Packet> packet = Create<Packet>(100); // 100-byte payload
-    uint16_t ethertype = 0x88B5;
-
-    WifiMacHeader hdr;
-    hdr.SetType(WIFI_MAC_DATA);
-    Mac48Address macAddr = Mac48Address::ConvertFrom(dev->GetAddress());
-    hdr.SetAddr1(dst);
-    hdr.SetAddr2(macAddr);
-    hdr.SetAddr3(macAddr);
-    hdr.SetDsNotFrom();
-    hdr.SetDsNotTo();
-
-    dev->Send(packet, dst, ethertype);
-}
-*/
 
 void animationSetup(AnimationInterface& anim, NodeContainer camera, NodeContainer mobile){
     for (uint8_t i = 0; i < mobile.GetN(); i++){
@@ -936,12 +917,14 @@ int main(int argc, char *argv[])
     NodeContainer mobile_nodes = CreateMobileNodes();
     NetDeviceContainer devices = WifiStack(camera_nodes);
 
-    //Ptr<NetDevice> dev1 = devices.Get(1);
-    //Mac48Address addr1 = Mac48Address::ConvertFrom(dev1->GetAddress());
-    //NS_LOG_INFO("Device 1 MAC Address: " << addr1);
+    NS_LOG_INFO("HER KOMMER MAC ADRESSES");
+    for (int i=0; i<3; i++){
+        Ptr<NetDevice> dev1 = devices.Get(i);
+        Mac48Address addr1 = Mac48Address::ConvertFrom(dev1->GetAddress());
+        NS_LOG_INFO("Device "<< i << " MAC Address: " << addr1);
+    }
 
     // Prepare device
-    //Ptr<NetDevice> dev0 = devices.Get(0);
     InternetStackHelper internet;
     internet.Install(camera_nodes);
 
@@ -962,9 +945,6 @@ int main(int argc, char *argv[])
     AnimationInterface anim("test-netanim.xml");
     anim.EnablePacketMetadata();
     animationSetup(anim, camera_nodes, mobile_nodes);
-
-    // Schedule packet send at t = 0.1s
-    //Simulator::Schedule(Seconds(1), &SendPacket, dev0, addr1);
 
     // Optionally stop simulation after e.g. 2 seconds
     Simulator::Stop(Seconds(simTime));
