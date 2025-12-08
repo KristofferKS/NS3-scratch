@@ -360,7 +360,7 @@ public:
     GossipApp();
     virtual ~GossipApp();
 
-    void Setup(double range, uint16_t port);
+    void Setup(double range, uint16_t port, double percentage);
     void SetupLogDir(std::string logDir);
     
     // Message generator configuration
@@ -384,6 +384,7 @@ private:
     uint16_t m_port;
     std::vector<uint32_t> m_peers;
     std::ofstream m_logFile;
+    double m_percentage;
     
     // Message generator
     Ptr<MessageGenerator> m_messageGenerator;
@@ -430,11 +431,11 @@ GossipApp::~GossipApp()
     m_socket = 0;
 }
 
-void
-GossipApp::Setup(double range, uint16_t port)
+void GossipApp::Setup(double range, uint16_t port, double percentage)
 {
     m_commRange = range;
     m_port = port;
+    m_percentage = percentage;  // Add this
 }
 
 void GossipApp::SetupLogDir(std::string logDir)
@@ -618,7 +619,7 @@ bool GossipApp::ReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packe
                       << header.GetDensity() << "," << header.GetTimestamp() << std::endl;
 
             // Propagate the update to a percentage of neighbors (excluding the sender)
-            double percentage = 0.51;
+            double percentage = m_percentage;
             size_t nPeers = m_peers.size();
             size_t nToSend = static_cast<size_t>(std::ceil(percentage * nPeers));
             if (nToSend == 0 && nPeers > 0) nToSend = 1;
@@ -729,7 +730,7 @@ void GossipApp::OnMessageGenerated(const DensityMessage& message)
     m_logFile << "gen," << now << "," << GetNode()->GetId() << "," << GetNode()->GetId() << ","
               << message.reading.density << "," << message.reading.timestamp << std::endl;
 
-    double percentage = 0.1;
+    double percentage = m_percentage;
     size_t nPeers = m_peers.size();
     size_t nToSend = static_cast<size_t>(std::ceil(percentage * nPeers));
     if (nToSend == 0 && nPeers > 0) nToSend = 1;
@@ -832,7 +833,7 @@ GossipApp::ReceivePacket(Ptr<Socket> socket)
 class GossipAppHelper
 {
 public:
-    GossipAppHelper(double range = 50.0, uint16_t port = 9, std::string logDir = "");
+    GossipAppHelper(double range = 50.0, uint16_t port = 9, std::string logDir = "", double percentage = 0.5);
     
     // Set message generator parameters
     void SetMessageGenerator(float minDensity, 
@@ -845,6 +846,7 @@ public:
     ApplicationContainer Install(Ptr<Node> node);
 
 private:
+    double m_percentage;
     double m_range;
     uint16_t m_port;
     std::string m_logDir;
@@ -858,10 +860,11 @@ private:
     bool m_useMessageGenerator;
 };
 
-GossipAppHelper::GossipAppHelper(double range, uint16_t port, std::string logDir)
+GossipAppHelper::GossipAppHelper(double range, uint16_t port, std::string logDir, double percentage)
     : m_range(range), 
       m_port(port),
       m_logDir(logDir),
+      m_percentage(percentage),
       m_minDensity(0.0f),
       m_maxDensity(100.0f),
       m_deltaDensity(10.0f),
@@ -900,7 +903,7 @@ ApplicationContainer
 GossipAppHelper::Install(Ptr<Node> node)
 {
     Ptr<GossipApp> app = CreateObject<GossipApp>();
-    app->Setup(m_range, m_port);
+    app->Setup(m_range, m_port, m_percentage);
     app->SetupLogDir(m_logDir);
     
     if (m_useMessageGenerator)
@@ -1143,8 +1146,11 @@ int main(int argc, char *argv[])
     double minInterval = 1.0;
     double maxInterval = 3.0;
 
+    double percentage = 0.1;
+
     // Command line parsing
     CommandLine cmd;
+    cmd.AddValue("percentage", "Percentage of neighbors to send messages to", percentage);
     cmd.AddValue("nNodes", "Number of nodes", nNodes);
     cmd.AddValue("commRange", "Communication range (meters)", commRange);
     cmd.AddValue("simTime", "Simulation time (seconds)", simTime);
@@ -1165,7 +1171,7 @@ int main(int argc, char *argv[])
 
     // Build network
     NodeContainer camera_nodes = CreateCameraNodes();
-    NodeContainer mobile_nodes = CreateMobileNodes();
+    //NodeContainer mobile_nodes = CreateMobileNodes();
     NetDeviceContainer devices = WifiStack(camera_nodes);
 
     // Get current date and time
@@ -1181,7 +1187,7 @@ int main(int argc, char *argv[])
     std::filesystem::create_directories(logDir);
 
     // Install gossip application with message generator
-    GossipAppHelper gossipApp(commRange, 9 , logDir);
+    GossipAppHelper gossipApp(commRange, 9 , logDir, percentage);
     gossipApp.SetMessageGenerator(minDensity, maxDensity, deltaDensity,
                                   Seconds(minInterval), Seconds(maxInterval));
     
