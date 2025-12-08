@@ -6,12 +6,19 @@
 #include "ns3/applications-module.h"
 #include "ns3/netanim-module.h"
 #include "ns3/buildings-module.h"
+#include "ns3/header.h"
 #include <cstdint>  // for uint32_t
 #include <iostream>
 #include <sys/stat.h>
 #include <fstream>
 #include <nlohmann/json.hpp>
-
+#include <algorithm>
+#include <random>
+#include <cmath>
+#include <filesystem>
+#include <chrono>
+#include <sstream>
+#include <iomanip> 
 
 using namespace std;
 
@@ -202,8 +209,8 @@ private:
         // Create message
         m_lastMessage = DensityMessage(m_nodeId, newDensity, timestamp);
 
-        //NS_LOG_INFO("Node " << m_nodeId << " generated message: density=" 
-        //            << newDensity << ", timestamp=" << timestamp << "ms");
+        NS_LOG_INFO("Node " << m_nodeId << " generated message: density=" 
+                    << newDensity << ", timestamp=" << timestamp << "ms");
 
         // Invoke callback if set
         if (!m_messageCallback.IsNull())
@@ -284,6 +291,65 @@ private:
 
 NS_OBJECT_ENSURE_REGISTERED(MessageGenerator);
 
+class GossipHeader : public Header
+{
+public:
+    GossipHeader() : m_nodeId(0), m_density(0.0f), m_timestamp(0) {}
+    GossipHeader(uint32_t nodeId, float density, uint32_t timestamp)
+        : m_nodeId(nodeId), m_density(density), m_timestamp(timestamp) {}
+
+    void Set(uint32_t nodeId, float density, uint32_t timestamp)
+    {
+        m_nodeId = nodeId;
+        m_density = density;
+        m_timestamp = timestamp;
+    }
+
+    static TypeId GetTypeId(void)
+    {
+        static TypeId tid = TypeId("GossipHeader")
+            .SetParent<Header>()
+            .AddConstructor<GossipHeader>();
+        return tid;
+    }
+    virtual TypeId GetInstanceTypeId(void) const override { return GetTypeId(); }
+
+    virtual void Serialize(Buffer::Iterator start) const override
+    {
+        start.WriteU32(m_nodeId);
+        start.WriteHtonU32(m_timestamp);
+        start.WriteU32(static_cast<uint32_t>(m_density * 10000)); // store as int
+    }
+
+    virtual uint32_t Deserialize(Buffer::Iterator start) override
+    {
+        m_nodeId = start.ReadU32();
+        m_timestamp = start.ReadNtohU32();
+        m_density = static_cast<float>(start.ReadU32()) / 10000.0f;
+        return GetSerializedSize();
+    }
+
+    virtual uint32_t GetSerializedSize(void) const override
+    {
+        return 4 + 4 + 4;
+    }
+
+    virtual void Print(std::ostream &os) const override
+    {
+        os << "NodeId=" << m_nodeId << ", Density=" << m_density << ", Timestamp=" << m_timestamp;
+    }
+
+    uint32_t GetNodeId() const { return m_nodeId; }
+    float GetDensity() const { return m_density; }
+    uint32_t GetTimestamp() const { return m_timestamp; }
+
+private:
+    uint32_t m_nodeId;
+    float m_density;
+    uint32_t m_timestamp;
+};
+NS_OBJECT_ENSURE_REGISTERED(GossipHeader);
+
 /**
  * GossipApp - Gossip protocol application with message generation
  */
@@ -295,6 +361,7 @@ public:
     virtual ~GossipApp();
 
     void Setup(double range, uint16_t port);
+    void SetupLogDir(std::string logDir);
     
     // Message generator configuration
     void SetupMessageGenerator(float minDensity, float maxDensity, 
@@ -328,6 +395,11 @@ private:
     float m_deltaDensity;
     Time m_minInterval;
     Time m_maxInterval;
+
+    std::string m_logDir;
+
+    // Density knowledge for gossip protocol
+    std::map<uint32_t, std::deque<std::pair<float, uint32_t>>> m_densityKnowledge;  // nodeId -> deque of (density, timestamp) pairs, max 5
 };
 
 TypeId
@@ -363,6 +435,11 @@ GossipApp::Setup(double range, uint16_t port)
 {
     m_commRange = range;
     m_port = port;
+}
+
+void GossipApp::SetupLogDir(std::string logDir)
+{
+    m_logDir = logDir;
 }
 
 void
@@ -441,7 +518,7 @@ void
 GossipApp::StartApplication(void)
 {
     // Open log file for this node
-    std::string fname = "gossip_log_node" + std::to_string(GetNode()->GetId()) + ".csv";
+    std::string fname = m_logDir + "gossip_log_node" + std::to_string(GetNode()->GetId()) + ".csv";
     m_logFile.open(fname, std::ios::out);
     m_logFile << "event,time,node_from,node_to,density,timestamp_ms" << std::endl;
 
@@ -452,7 +529,16 @@ GossipApp::StartApplication(void)
     for (uint32_t i = 0; i < node->GetNDevices(); ++i)
     {
         Ptr<NetDevice> dev = node->GetDevice(i);
-        dev->SetReceiveCallback(MakeCallback(&GossipApp::ReceiveFromDevice, this));
+        if (DynamicCast<WifiNetDevice>(dev) != nullptr)  // Only WiFi devices
+        {
+            dev->SetReceiveCallback(MakeCallback(&GossipApp::ReceiveFromDevice, this));
+        }
+    }
+
+    // Initialize density knowledge for all nodes
+    for (uint32_t i = 0; i < NodeList::GetNNodes(); ++i)
+    {
+        m_densityKnowledge[i] = std::deque<std::pair<float, uint32_t>>();  // Empty deque for each node
     }
 
     // Setup message generator now that node is available
@@ -480,20 +566,113 @@ bool GossipApp::ReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packe
     uint32_t myId = GetNode()->GetId();
     double now = Simulator::Now().GetSeconds();
 
-    // Deserialize message
-    uint32_t size = packet->GetSize();
-    uint8_t* buffer = new uint8_t[size];
-    packet->CopyData(buffer, size);
+    // Copy the packet and remove the header
+    Ptr<Packet> copy = packet->Copy();
+    GossipHeader header;
+    copy->RemoveHeader(header);
 
-    DensityMessage message = DensityMessage::Deserialize(buffer);
-    delete[] buffer;
+    uint32_t senderId = header.GetNodeId();
 
-    m_logFile << "recv," << now << "," << message.nodeId << "," << myId << ","
-              << message.reading.density << "," << message.reading.timestamp << std::endl;
-    
-     NS_LOG_INFO("Node " << myId << " received message from node " << message.nodeId
-                 << " (density=" << message.reading.density
-                 << ", timestamp=" << message.reading.timestamp << " ms) at " << now << "s");
+    // Ignore messages from self
+    if (senderId == myId)
+    {
+        NS_LOG_DEBUG("Node " << myId << " ignoring self-message");
+        return true;
+    }
+
+    // Log recv event to CSV
+    m_logFile << "recv," << now << "," << senderId << "," << myId << ","
+              << header.GetDensity() << "," << header.GetTimestamp() << std::endl;
+
+    NS_LOG_INFO("Node " << myId << " received message from node " << senderId
+                << " (density=" << header.GetDensity()
+                << ", timestamp=" << header.GetTimestamp() << " ms) at " << now << "s");
+
+    // Update density knowledge for the sender node
+    if (m_densityKnowledge.find(senderId) != m_densityKnowledge.end())
+    {
+        // Check if the new timestamp is newer than existing ones
+        uint32_t maxExistingTimestamp = 0;
+        for (const auto& entry : m_densityKnowledge[senderId])
+        {
+            if (entry.second > maxExistingTimestamp)
+            {
+                maxExistingTimestamp = entry.second;
+            }
+        }
+
+        if (header.GetTimestamp() > maxExistingTimestamp)
+        {
+            // Update knowledge
+            m_densityKnowledge[senderId].push_back({header.GetDensity(), header.GetTimestamp()});
+            // Keep only the last 5 entries
+            if (m_densityKnowledge[senderId].size() > 5)
+            {
+                m_densityKnowledge[senderId].pop_front();
+            }
+            NS_LOG_DEBUG("Node " << myId << " updated knowledge for node " << senderId 
+                         << ": density=" << header.GetDensity() << ", timestamp=" << header.GetTimestamp());
+
+            // Log update event to CSV
+            m_logFile << "update," << now << "," << senderId << "," << myId << ","
+                      << header.GetDensity() << "," << header.GetTimestamp() << std::endl;
+
+            // Propagate the update to a percentage of neighbors (excluding the sender)
+            double percentage = 0.51;
+            size_t nPeers = m_peers.size();
+            size_t nToSend = static_cast<size_t>(std::ceil(percentage * nPeers));
+            if (nToSend == 0 && nPeers > 0) nToSend = 1;
+
+            // Shuffle peers
+            std::vector<uint32_t> shuffledPeers = m_peers;
+            std::random_device rd;
+            std::mt19937 g(rd());
+            std::shuffle(shuffledPeers.begin(), shuffledPeers.end(), g);
+
+            Ptr<Node> node = GetNode();
+            for (uint32_t i = 0; i < node->GetNDevices(); ++i)
+            {
+                Ptr<NetDevice> dev = node->GetDevice(i);
+                // Only use WiFiNetDevice
+                if (DynamicCast<WifiNetDevice>(dev) == nullptr)
+                    continue;
+
+                for (size_t idx = 0; idx < nToSend; ++idx)
+                {
+                    uint32_t peerIndex = shuffledPeers[idx];
+                    // Skip the original sender
+                    if (peerIndex == senderId) continue;
+
+                    Ptr<Node> peerNode = NodeList::GetNode(peerIndex);
+                    Ptr<NetDevice> peerDev;
+                    for (uint32_t j = 0; j < peerNode->GetNDevices(); ++j) {
+                        if (DynamicCast<WifiNetDevice>(peerNode->GetDevice(j)) != nullptr) {
+                            peerDev = peerNode->GetDevice(j);
+                            break;
+                        }
+                    }
+                    if (!peerDev) continue; // No WiFi device found, skip
+
+                    Mac48Address dstMac = Mac48Address::ConvertFrom(peerDev->GetAddress());
+                    Mac48Address myMac = Mac48Address::ConvertFrom(dev->GetAddress());
+                    if (dstMac == myMac) continue; // Skip self
+
+                    // Create DensityMessage from header for sending
+                    DensityMessage messageToSend(header.GetNodeId(), header.GetDensity(), header.GetTimestamp());
+                    SendMessage(dev, dstMac, messageToSend);
+                }
+            }
+        }
+        else
+        {
+            NS_LOG_DEBUG("Node " << myId << " received outdated message from node " << senderId 
+                        << " (timestamp=" << header.GetTimestamp() << " <= max=" << maxExistingTimestamp << "), dropping");
+
+            // Log drop event to CSV
+            m_logFile << "drop," << now << "," << senderId << "," << myId << ","
+                    << header.GetDensity() << "," << header.GetTimestamp() << std::endl;
+        }
+    }
 
     return true; // Indicate packet was handled
 }
@@ -508,6 +687,29 @@ GossipApp::StopApplication(void)
     {
         m_socket->Close();
     }
+
+    // Write final knowledge to CSV
+    std::ofstream knowledgeFile(m_logDir + "final_knowledge.csv", std::ios::app);
+    if (knowledgeFile.is_open())
+    {
+        knowledgeFile << GetNode()->GetId() << ",";
+        for (const auto& nodeKnowledge : m_densityKnowledge)
+        {
+            knowledgeFile << "node" << nodeKnowledge.first << ":";
+            for (const auto& entry : nodeKnowledge.second)
+            {
+                knowledgeFile << entry.first << "," << entry.second << ";";
+            }
+            knowledgeFile << "|";
+        }
+        knowledgeFile << std::endl;
+        knowledgeFile.close();
+    }
+    else
+    {
+        NS_LOG_ERROR("Failed to open final_knowledge.csv for writing");
+    }
+
     if (m_logFile.is_open())
     {
         m_logFile.close();
@@ -521,6 +723,23 @@ void GossipApp::OnMessageGenerated(const DensityMessage& message)
                 << message.reading.density << ", timestamp=" 
                 << message.reading.timestamp << "ms");
 
+    double now = Simulator::Now().GetSeconds();
+
+    // Log generated message to CSV
+    m_logFile << "gen," << now << "," << GetNode()->GetId() << "," << GetNode()->GetId() << ","
+              << message.reading.density << "," << message.reading.timestamp << std::endl;
+
+    double percentage = 0.1;
+    size_t nPeers = m_peers.size();
+    size_t nToSend = static_cast<size_t>(std::ceil(percentage * nPeers));
+    if (nToSend == 0 && nPeers > 0) nToSend = 1;
+
+    // Shuffle peers
+    std::vector<uint32_t> shuffledPeers = m_peers;
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(shuffledPeers.begin(), shuffledPeers.end(), g);
+
     Ptr<Node> node = GetNode();
     for (uint32_t i = 0; i < node->GetNDevices(); ++i)
     {
@@ -529,8 +748,9 @@ void GossipApp::OnMessageGenerated(const DensityMessage& message)
         if (DynamicCast<WifiNetDevice>(dev) == nullptr)
             continue;
 
-        for (const auto& peerIndex : m_peers)
+        for (size_t idx = 0; idx < nToSend; ++idx)
         {
+            uint32_t peerIndex = shuffledPeers[idx];
             Ptr<Node> peerNode = NodeList::GetNode(peerIndex);
             Ptr<NetDevice> peerDev;
             for (uint32_t j = 0; j < peerNode->GetNDevices(); ++j) {
@@ -542,13 +762,14 @@ void GossipApp::OnMessageGenerated(const DensityMessage& message)
             if (!peerDev) continue; // No WiFi device found, skip
 
             Mac48Address dstMac = Mac48Address::ConvertFrom(peerDev->GetAddress());
+            Mac48Address myMac = Mac48Address::ConvertFrom(dev->GetAddress());
+            if (dstMac == myMac) continue;
             SendMessage(dev, dstMac, message);
         }
     }
 }
 
-void
-GossipApp::SendMessage(Ptr<NetDevice> dev, Mac48Address dst, const DensityMessage& message)
+void GossipApp::SendMessage(Ptr<NetDevice> dev, Mac48Address dst, const DensityMessage& message)
 {
     if (m_peers.empty())
     {
@@ -556,24 +777,19 @@ GossipApp::SendMessage(Ptr<NetDevice> dev, Mac48Address dst, const DensityMessag
         return;
     }
 
-    // Serialize message
-    uint32_t msgSize = message.GetSerializedSize();
-    uint8_t* buffer = new uint8_t[msgSize];
-    message.Serialize(buffer);
-
-    Ptr<Packet> packet = Create<Packet>(buffer, msgSize);
-    delete[] buffer;
+    // Create packet and add custom header
+    Ptr<Packet> packet = Create<Packet>();
+    GossipHeader header(message.nodeId, message.reading.density, message.reading.timestamp);
+    packet->AddHeader(header);
 
     uint16_t ethertype = 0x88B5;
 
-    WifiMacHeader hdr;
-    hdr.SetType(WIFI_MAC_DATA);
     Mac48Address macAddr = Mac48Address::ConvertFrom(dev->GetAddress());
-    hdr.SetAddr1(dst);
-    hdr.SetAddr2(macAddr);
-    hdr.SetAddr3(macAddr);
-    hdr.SetDsNotFrom();
-    hdr.SetDsNotTo();
+
+    // Log send event to CSV
+    double now = Simulator::Now().GetSeconds();
+    m_logFile << "send," << now << "," << GetNode()->GetId() << "," << dst << ","
+              << message.reading.density << "," << message.reading.timestamp << std::endl;
 
     dev->Send(packet, dst, ethertype);
 
@@ -616,7 +832,7 @@ GossipApp::ReceivePacket(Ptr<Socket> socket)
 class GossipAppHelper
 {
 public:
-    GossipAppHelper(double range = 50.0, uint16_t port = 9);
+    GossipAppHelper(double range = 50.0, uint16_t port = 9, std::string logDir = "");
     
     // Set message generator parameters
     void SetMessageGenerator(float minDensity, 
@@ -631,6 +847,7 @@ public:
 private:
     double m_range;
     uint16_t m_port;
+    std::string m_logDir;
     
     // Message generator parameters
     float m_minDensity;
@@ -641,9 +858,10 @@ private:
     bool m_useMessageGenerator;
 };
 
-GossipAppHelper::GossipAppHelper(double range, uint16_t port)
+GossipAppHelper::GossipAppHelper(double range, uint16_t port, std::string logDir)
     : m_range(range), 
       m_port(port),
+      m_logDir(logDir),
       m_minDensity(0.0f),
       m_maxDensity(100.0f),
       m_deltaDensity(10.0f),
@@ -683,6 +901,7 @@ GossipAppHelper::Install(Ptr<Node> node)
 {
     Ptr<GossipApp> app = CreateObject<GossipApp>();
     app->Setup(m_range, m_port);
+    app->SetupLogDir(m_logDir);
     
     if (m_useMessageGenerator)
     {
@@ -839,15 +1058,47 @@ NetDeviceContainer WifiStack(NodeContainer& nodes){
     NS_LOG_INFO("Installing WiFi devices on nodes");
     NetDeviceContainer devices = wifi.Install(phy, mac, nodes);
     return devices;
-}
+} 
 
-void LoraStack(){
-    ;
-}
+/*
+void pointToPointEther(NodeContainer& nodes){
+    // Find the neighbor within communication range from placement.json
+    const char* file = "placement.json";
+    double commRange = 50.0;
 
-void Cellular(){
-    ;
+    // Call Python script to calculate neighbors
+    std::string command = "python3 calculate_neighbors.py " + std::to_string((int)commRange) + " " + file + " neighbors.json";
+    int result = system(command.c_str());
+    
+    if (result == 0) {
+        NS_LOG_UNCOND("Successfully calculated neighbors and saved to neighbors.json");
+    } else {
+        NS_LOG_UNCOND("Error running calculate_neighbors.py");
+    }
+    
+    // Read neighbors from neighbors.json
+    std::ifstream inFile("neighbors.json");
+    nlohmann::json neighborsJson;
+    inFile >> neighborsJson;
+    inFile.close();
+    // Set up point-to-point links based on neighbors
+    for (auto& [nodeId, neighborList] : neighborsJson.items()) {
+        uint32_t nodeIndex = std::stoi(nodeId);
+        Ptr<Node> node = nodes.GetNode(nodeIndex);
+        for (auto& neighborId : neighborList) {
+            uint32_t neighborIndex = neighborId.get<uint32_t>();
+            Ptr<Node> neighborNode = nodes.GetNode(neighborIndex);
+            // Set up point-to-point link between node and neighborNode
+            PointToPointHelper p2p;
+            p2p.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
+            p2p.SetChannelAttribute("Delay", StringValue("2ms"));
+            NetDeviceContainer devices = p2p.Install(node, neighborNode);
+            NS_LOG_UNCOND("Established point-to-point link between Node " << nodeIndex << " and Node " << neighborIndex);
+        }
+
+    }
 }
+*/
 
 void CostumHeader(){
     ;
@@ -917,23 +1168,20 @@ int main(int argc, char *argv[])
     NodeContainer mobile_nodes = CreateMobileNodes();
     NetDeviceContainer devices = WifiStack(camera_nodes);
 
-    NS_LOG_INFO("HER KOMMER MAC ADRESSES");
-    for (int i=0; i<3; i++){
-        Ptr<NetDevice> dev1 = devices.Get(i);
-        Mac48Address addr1 = Mac48Address::ConvertFrom(dev1->GetAddress());
-        NS_LOG_INFO("Device "<< i << " MAC Address: " << addr1);
-    }
+    // Get current date and time
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm = *std::localtime(&time_t);
+    std::stringstream ss;
+    ss << std::put_time(&tm, "%Y-%m-%d_%H-%M-%S");
+    std::string timestamp = ss.str();
 
-    // Prepare device
-    InternetStackHelper internet;
-    internet.Install(camera_nodes);
-
-    Ipv4AddressHelper ipv4;
-    ipv4.SetBase("10.1.1.0", "255.255.255.0");
-    ipv4.Assign(devices);
+    // Create directory structure: test/YYYY-MM-DD_HH-MM-SS/
+    std::string logDir = "test/" + timestamp + "/";
+    std::filesystem::create_directories(logDir);
 
     // Install gossip application with message generator
-    GossipAppHelper gossipApp(commRange);
+    GossipAppHelper gossipApp(commRange, 9 , logDir);
     gossipApp.SetMessageGenerator(minDensity, maxDensity, deltaDensity,
                                   Seconds(minInterval), Seconds(maxInterval));
     
@@ -942,9 +1190,10 @@ int main(int argc, char *argv[])
     apps.Stop(Seconds(simTime - 1.0));
 
 
-    AnimationInterface anim("test-netanim.xml");
-    anim.EnablePacketMetadata();
-    animationSetup(anim, camera_nodes, mobile_nodes);
+    //AnimationInterface anim("test-netanim.xml");
+    //anim.SetMaxPktsPerTraceFile(5000000);
+    //anim.EnablePacketMetadata();
+    //animationSetup(anim, camera_nodes, mobile_nodes);
 
     // Optionally stop simulation after e.g. 2 seconds
     Simulator::Stop(Seconds(simTime));
