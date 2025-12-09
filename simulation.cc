@@ -44,6 +44,7 @@ struct DensityReading
 struct DensityMessage
 {
     uint32_t nodeId;
+    uint32_t lastNode;
     DensityReading reading;
 
     DensityMessage() : nodeId(0) {}
@@ -53,7 +54,7 @@ struct DensityMessage
     // Get serialized size
     uint32_t GetSerializedSize() const
     {
-        return sizeof(nodeId) + sizeof(reading.density) + sizeof(reading.timestamp);
+        return sizeof(nodeId) + sizeof(reading.density) + sizeof(reading.timestamp) + sizeof(lastNode);
     }
     
     // Serialize to buffer
@@ -63,6 +64,9 @@ struct DensityMessage
         
         std::memcpy(buffer + offset, &nodeId, sizeof(nodeId));
         offset += sizeof(nodeId);
+
+        std::memcpy(buffer + offset, &lastNode, sizeof(lastNode));
+        offset += sizeof(lastNode);
         
         std::memcpy(buffer + offset, &reading.density, sizeof(reading.density));
         offset += sizeof(reading.density);
@@ -78,7 +82,10 @@ struct DensityMessage
         
         std::memcpy(&msg.nodeId, buffer + offset, sizeof(msg.nodeId));
         offset += sizeof(msg.nodeId);
-        
+
+        std::memcpy(&msg.lastNode, buffer + offset,sizeof(msg.lastNode));
+        offset += sizeof(msg.lastNode);
+
         std::memcpy(&msg.reading.density, buffer + offset, sizeof(msg.reading.density));
         offset += sizeof(msg.reading.density);
         
@@ -110,6 +117,7 @@ public:
     
     MessageGenerator()
         : m_nodeId(0),
+          m_lastNode(0),
           m_minDensity(0.0f),
           m_maxDensity(100.0f),
           m_deltaDensity(10.0f),
@@ -128,6 +136,7 @@ public:
     }
 
     void Setup(uint32_t nodeId,
+               uint32_t lastNode,
                float minDensity,
                float maxDensity,
                float deltaDensity,
@@ -139,6 +148,7 @@ public:
         NS_ASSERT(minInterval <= maxInterval);
 
         m_nodeId = nodeId;
+        m_lastNode = lastNode;
         m_minDensity = minDensity;
         m_maxDensity = maxDensity;
         m_deltaDensity = deltaDensity;
@@ -269,6 +279,7 @@ private:
 
     // Configuration
     uint32_t m_nodeId;
+    uint32_t m_lastNode;
     float m_minDensity;
     float m_maxDensity;
     float m_deltaDensity;
@@ -294,13 +305,14 @@ NS_OBJECT_ENSURE_REGISTERED(MessageGenerator);
 class GossipHeader : public Header
 {
 public:
-    GossipHeader() : m_nodeId(0), m_density(0.0f), m_timestamp(0) {}
-    GossipHeader(uint32_t nodeId, float density, uint32_t timestamp)
-        : m_nodeId(nodeId), m_density(density), m_timestamp(timestamp) {}
+    GossipHeader() : m_nodeId(0), m_lastNode(0), m_density(0.0f), m_timestamp(0) {}
+    GossipHeader(uint32_t nodeId, uint32_t lastNode, float density, uint32_t timestamp)
+        : m_nodeId(nodeId), m_lastNode(lastNode), m_density(density), m_timestamp(timestamp) {}
 
-    void Set(uint32_t nodeId, float density, uint32_t timestamp)
+    void Set(uint32_t nodeId, uint32_t lastNode, float density, uint32_t timestamp)
     {
         m_nodeId = nodeId;
+        m_lastNode = lastNode;
         m_density = density;
         m_timestamp = timestamp;
     }
@@ -317,6 +329,7 @@ public:
     virtual void Serialize(Buffer::Iterator start) const override
     {
         start.WriteU32(m_nodeId);
+        start.WriteU32(m_lastNode);
         start.WriteHtonU32(m_timestamp);
         start.WriteU32(static_cast<uint32_t>(m_density * 10000)); // store as int
     }
@@ -324,6 +337,7 @@ public:
     virtual uint32_t Deserialize(Buffer::Iterator start) override
     {
         m_nodeId = start.ReadU32();
+        m_lastNode = start.ReadU32();
         m_timestamp = start.ReadNtohU32();
         m_density = static_cast<float>(start.ReadU32()) / 10000.0f;
         return GetSerializedSize();
@@ -331,20 +345,22 @@ public:
 
     virtual uint32_t GetSerializedSize(void) const override
     {
-        return 4 + 4 + 4;
+        return 4 + 4 + 4 + 4;
     }
 
     virtual void Print(std::ostream &os) const override
     {
-        os << "NodeId=" << m_nodeId << ", Density=" << m_density << ", Timestamp=" << m_timestamp;
+        os << "NodeId=" << m_nodeId << ", LastNode=" << m_lastNode << ", Density=" << m_density << ", Timestamp=" << m_timestamp;
     }
 
     uint32_t GetNodeId() const { return m_nodeId; }
+    uint32_t GetLastNode() const { return m_lastNode; }
     float GetDensity() const { return m_density; }
     uint32_t GetTimestamp() const { return m_timestamp; }
 
 private:
     uint32_t m_nodeId;
+    uint32_t m_lastNode;
     float m_density;
     uint32_t m_timestamp;
 };
@@ -373,7 +389,6 @@ protected:
 
 private:
     void SendMessage(Ptr<NetDevice> dev, Mac48Address dst, const DensityMessage& message);
-    void ReceivePacket(Ptr<Socket> socket);
     void DiscoverPeers(void);
     void OnMessageGenerated(const DensityMessage& message);
     Mac48Address GetMacFromIpv4(const Ipv4Address& ipv4);
@@ -460,7 +475,7 @@ GossipApp::SetupMessageGenerator(float minDensity, float maxDensity,
 
 Mac48Address GossipApp::GetMacFromIpv4(const Ipv4Address& ip)
 {
-    for (uint32_t i = 0; i < NodeList::GetNNodes(); ++i)
+    for (uint32_t i = 0; i < m_nCameraNodes; ++i)
     {
         Ptr<Node> node = NodeList::GetNode(i);
         Ptr<Ipv4> ipv4 = node->GetObject<Ipv4>();
@@ -539,7 +554,7 @@ GossipApp::StartApplication(void)
     }
 
     // Initialize density knowledge for all nodes
-    for (uint32_t i = 0; i < NodeList::GetNNodes(); ++i)
+    for (uint32_t i = 0; i < m_nCameraNodes; ++i)
     {
         m_densityKnowledge[i] = std::deque<std::pair<float, uint32_t>>();  // Empty deque for each node
     }
@@ -548,7 +563,9 @@ GossipApp::StartApplication(void)
     if (m_messageGeneratorConfigured)
     {
         uint32_t nodeId = GetNode()->GetId();
-        m_messageGenerator->Setup(nodeId, 
+        uint32_t m_lastNode = nodeId; // Assuming lastNode is the same as nodeId for initial setup
+        m_messageGenerator->Setup(nodeId,
+                                    m_lastNode, 
                                     m_minDensity, 
                                     m_maxDensity, 
                                     m_deltaDensity,
@@ -573,8 +590,9 @@ bool GossipApp::ReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packe
     Ptr<Packet> copy = packet->Copy();
     GossipHeader header;
     copy->RemoveHeader(header);
-
+    
     uint32_t senderId = header.GetNodeId();
+    uint32_t lastNode = header.GetLastNode();
 
     // Ignore messages from self
     if (senderId == myId)
@@ -620,17 +638,34 @@ bool GossipApp::ReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packe
             m_logFile << "update," << now << "," << senderId << "," << myId << ","
                       << header.GetDensity() << "," << header.GetTimestamp() << std::endl;
 
-            // Propagate the update to a percentage of neighbors (excluding the sender)
+            NS_LOG_INFO("Node " << myId << " got a message from " << lastNode);
+            // Prepare list of peers excluding sender and self
+            std::vector<uint32_t> shuffledPeers;
+            shuffledPeers.reserve(m_peers.size());
+            for (auto peer : m_peers) {
+                if (peer != lastNode && peer != myId) {
+                    shuffledPeers.push_back(peer);
+                }
+            }
+
+            if (shuffledPeers.empty()) {
+                NS_LOG_DEBUG("Node " << myId << " has no peers to propagate to after excluding sender and self");
+                return true;
+            }
+
+            // Propagate the update to a percentage of neighbors (excluding the sender, and self)
             double percentage = m_percentage;
-            size_t nPeers = m_peers.size();
+            size_t nPeers = shuffledPeers.size();
             size_t nToSend = static_cast<size_t>(std::ceil(percentage * nPeers));
             if (nToSend == 0 && nPeers > 0) nToSend = 1;
-
+            
             // Shuffle peers
-            std::vector<uint32_t> shuffledPeers = m_peers;
             std::random_device rd;
             std::mt19937 g(rd());
             std::shuffle(shuffledPeers.begin(), shuffledPeers.end(), g);
+
+            size_t limit = std::min(nToSend, shuffledPeers.size());
+            size_t sentCount = 0;
 
             Ptr<Node> node = GetNode();
             for (uint32_t i = 0; i < node->GetNDevices(); ++i)
@@ -640,11 +675,9 @@ bool GossipApp::ReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packe
                 if (DynamicCast<WifiNetDevice>(dev) == nullptr)
                     continue;
 
-                for (size_t idx = 0; idx < nToSend; ++idx)
+                for (size_t idx = 0; idx < limit && sentCount < limit; ++idx)
                 {
                     uint32_t peerIndex = shuffledPeers[idx];
-                    // Skip the original sender
-                    if (peerIndex == senderId) continue;
 
                     Ptr<Node> peerNode = NodeList::GetNode(peerIndex);
                     Ptr<NetDevice> peerDev;
@@ -680,8 +713,7 @@ bool GossipApp::ReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packe
     return true; // Indicate packet was handled
 }
 
-void
-GossipApp::StopApplication(void)
+void GossipApp::StopApplication(void)
 {
     // Stop message generator
     m_messageGenerator->Stop();
@@ -691,19 +723,46 @@ GossipApp::StopApplication(void)
         m_socket->Close();
     }
 
-    // Write final knowledge to CSV
+    // Write final knowledge to CSV with expanded tabular headers and columns
     std::ofstream knowledgeFile(m_logDir + "final_knowledge.csv", std::ios::app);
     if (knowledgeFile.is_open())
     {
-        knowledgeFile << GetNode()->GetId() << ",";
-        for (const auto& nodeKnowledge : m_densityKnowledge)
+        // Add header if file is empty (first write)
+        knowledgeFile.seekp(0, std::ios::end);
+        if (knowledgeFile.tellp() == 0)
         {
-            knowledgeFile << "node" << nodeKnowledge.first << ":";
-            for (const auto& entry : nodeKnowledge.second)
+            knowledgeFile << "index";
+            for (uint32_t node = 0; node < m_nCameraNodes; ++node)
             {
-                knowledgeFile << entry.first << "," << entry.second << ";";
+                for (size_t ent = 0; ent < 5; ++ent)  // Assuming max 5 entries per node
+                {
+                    knowledgeFile << ",node" << node << "density" << ent << ",node" << node << "time" << ent;
+                }
             }
-            knowledgeFile << "|";
+            knowledgeFile << std::endl;
+        }
+
+        // Write the node ID (index)
+        knowledgeFile << GetNode()->GetId();
+
+        // Write densities and timestamps for each node, padding with empty values
+        for (uint32_t node = 0; node < m_nCameraNodes; ++node)
+        {
+            auto it = m_densityKnowledge.find(node);
+            size_t entryCount = 0;
+            if (it != m_densityKnowledge.end())
+            {
+                for (const auto& entry : it->second)
+                {
+                    knowledgeFile << "," << entry.first << "," << entry.second;
+                    ++entryCount;
+                }
+            }
+            // Pad with empty values for missing entries (up to 5)
+            for (size_t ent = entryCount; ent < 5; ++ent)
+            {
+                knowledgeFile << ",,";
+            }
         }
         knowledgeFile << std::endl;
         knowledgeFile.close();
@@ -780,9 +839,11 @@ void GossipApp::SendMessage(Ptr<NetDevice> dev, Mac48Address dst, const DensityM
         return;
     }
 
+    uint32_t lastNode = GetNode()->GetId();
+
     // Create packet and add custom header
     Ptr<Packet> packet = Create<Packet>();
-    GossipHeader header(message.nodeId, message.reading.density, message.reading.timestamp);
+    GossipHeader header(message.nodeId, lastNode, message.reading.density, message.reading.timestamp);
     packet->AddHeader(header);
 
     uint16_t ethertype = 0x88B5;
@@ -799,35 +860,6 @@ void GossipApp::SendMessage(Ptr<NetDevice> dev, Mac48Address dst, const DensityM
     NS_LOG_INFO("Packet sent from " << macAddr << " to " << dst);
 }
 
-void
-GossipApp::ReceivePacket(Ptr<Socket> socket)
-{
-    Ptr<Packet> packet;
-    Address from;
-
-    while ((packet = socket->RecvFrom(from)))
-    {
-        uint32_t myId = GetNode()->GetId();
-        InetSocketAddress fromAddr = InetSocketAddress::ConvertFrom(from);
-        double now = Simulator::Now().GetSeconds();
-        
-        // Deserialize message
-        uint32_t size = packet->GetSize();
-        uint8_t* buffer = new uint8_t[size];
-        packet->CopyData(buffer, size);
-        
-        DensityMessage message = DensityMessage::Deserialize(buffer);
-        delete[] buffer;
-        
-        NS_LOG_INFO("Node " << myId << " received density message from " 
-                    << fromAddr.GetIpv4() << " (source node=" << message.nodeId 
-                    << ", density=" << message.reading.density 
-                    << ", timestamp=" << message.reading.timestamp << "ms)");
-        
-        m_logFile << "recv," << now << "," << message.nodeId << "," << myId << "," 
-                  << message.reading.density << "," << message.reading.timestamp << std::endl;
-    }
-}
 
 /**
  * GossipAppHelper
@@ -923,11 +955,6 @@ GossipAppHelper::Install(Ptr<Node> node)
     return ApplicationContainer(app);
 }
 
-struct NodeDate{
-    int nodeid;
-    float density;
-    int64_t timestamp;
-};
 
 NodeContainer CreateCameraNodes();
 void SetCameraMobility(uint8_t node, NodeContainer& camera_nodes);
@@ -966,23 +993,20 @@ void SetCameraMobility(uint8_t node, NodeContainer& camera_nodes) {
     std::string placement;
 
     if (stat(node_file, &sb) == 0){
-
         // Read from the text file
-        ifstream MyReadFile(node_file);
+        std::ifstream MyReadFile(node_file);
 
         // Use a while loop together with the getline() function to read the file line by line
         while (getline (MyReadFile, placement)) {
-        // Output the text from the file
-        cout << placement;
+            // Output the text from the file
+            std::cout << placement;
         }
 
         // Close the file
         MyReadFile.close();
-
     }
-
     else{
-        std::string command = "python3 /node_placement.py " + std::to_string(node) + " " + std::to_string(wifiRange) + " " + std::to_string(centerX) + " " + std::to_string(centerY) + " " + std::to_string(radius);
+        std::string command = "python3 scratch/node_placement.py " + std::to_string(node) + " " + std::to_string(wifiRange) + " " + std::to_string(centerX) + " " + std::to_string(centerY) + " " + std::to_string(radius);
         // Read positions from file
         char buffer[128];
         FILE* pipe = popen(command.c_str(), "r");
@@ -996,19 +1020,47 @@ void SetCameraMobility(uint8_t node, NodeContainer& camera_nodes) {
 
         pclose(pipe);
         std::cout << "Python returned: " << placement << std::endl;
-
     }
 
     auto nodes = nlohmann::json::parse(placement);
 
-    // Set up camera node mobility
-    Ptr<ListPositionAllocator> listAlloc = CreateObject<ListPositionAllocator>();
-        // Parse JSON → add positions
+    // Create a new JSON with 0-indexed keys (convert from 1-50 to 0-49)
+    nlohmann::json reindexedNodes;
+    
     for (auto& [key, value] : nodes.items()) {
+        uint32_t oldId = std::stoi(key);
+        uint32_t newId = oldId - 1;  // Convert 1-50 to 0-49
+        reindexedNodes[std::to_string(newId)] = value;
+    }
+    
+    // Overwrite placement.json with 0-indexed version
+    std::ofstream outFile("/placement.json");
+    outFile << reindexedNodes.dump(4);  // Pretty print with 4 spaces
+    outFile.close();
+    NS_LOG_UNCOND("Rewrote placement.json with 0-indexed keys (0-49)");
+
+    // Create a vector of (nodeId, position) pairs and sort by nodeId numerically
+    std::vector<std::pair<uint32_t, std::pair<double, double>>> sortedNodes;
+    
+    for (auto& [key, value] : reindexedNodes.items()) {
+        uint32_t nodeId = std::stoi(key);
         double x = value[0];
         double y = value[1];
+        sortedNodes.push_back({nodeId, {x, y}});
+    }
+    
+    // Sort by node ID numerically (not alphabetically)
+    std::sort(sortedNodes.begin(), sortedNodes.end(), 
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    // Now add positions in the correct order
+    Ptr<ListPositionAllocator> listAlloc = CreateObject<ListPositionAllocator>();
+    
+    for (const auto& [nodeId, pos] : sortedNodes) {
+        double x = pos.first;
+        double y = pos.second;
         listAlloc->Add(Vector(x, y, 0.0));
-        std::cout << "Loaded node " << key << ": (" << x << ", " << y << ")\n";
+        std::cout << "Loaded node " << nodeId << ": (" << x << ", " << y << ")\n";
     }
 
     MobilityHelper CameraMobility;
@@ -1107,18 +1159,6 @@ void pointToPointEther(NodeContainer& nodes){
 }
 */
 
-void CostumHeader(){
-    ;
-}
-
-void GossipProtocol(){
-    ;
-}
-
-void neighborDiscovery(){
-    ;
-}
-
 void TxCallback(Ptr<const Packet> packet)
 {
     NS_LOG_UNCOND("Packet transmitted at " << Simulator::Now().GetSeconds() << "s: " << packet->GetSize() << " bytes");
@@ -1212,27 +1252,3 @@ int main(int argc, char *argv[])
     Simulator::Destroy();
     return 0;
 }
-
-
-/*
-I DiscoverPeers bruger vi NodeList::GetNNodes()
-denne returnerer det totale antal noder i simuleringen dva staiske + mobiel
-den bruges 7 gange i filen VI SKAL SPECIFICERE dette skal specificeres til enten statisk
-
-Det vil altså sige at m_peers indeholder indexerne på på statiske og mobiel nod
-og nPeers for antallet af både statiske og mobiel noder.
-
-Tænker at dette kan rettes op på ved at ændre NodeList::GetNNodes() til specificere node type
-Eller også skal der laves en check i DiscoverPeers for at sikre at kun statiske noder tilføjes til m_peers
-eller også skal der laves en check i OnMessagGenerated og ReceiveFromDevice for at sikre at kun statiske noder modtager og sender beskeder
-
-kan man ikke bare iterere over camera_nodes i stedet for NodeList::GetNNodes()?????
-
-rettet....
-definerede m_nCameraNodes i GossipApp og gossipAppHelper og satte den i Setup og brugte den i DiscoverPeers i stedet for NodeList::GetNNodes()
-Der forsøges nu ikke at sende beskeder til mobile, og der tabes ikke pakker på det.
-
-Burde dog også ændres de andre steder hvor NodeList::GetNNodes() bruges.
-
-
-*/
