@@ -26,6 +26,9 @@ using namespace std;
 using namespace ns3;
 NS_LOG_COMPONENT_DEFINE("First");
 
+std::map<std::string, NetDeviceContainer> p2pDevices;
+std::map<std::pair<uint32_t, uint32_t>, std::pair<Ipv4Address, Ipv4Address>> linkIPs;  // Add this
+
 
 /**
  * Structure representing a single density reading
@@ -379,7 +382,7 @@ public:
 
     void Setup(double range, uint16_t port, double percentage, uint32_t nCameraNodes);
     void SetupLogDir(std::string logDir);
-    //void SetNodeToIP(const std::map<uint32_t, Ipv4Address>& nodeToIP);
+    void SetNodeToIP(const std::map<uint32_t, Ipv4Address>& nodeToIP);
     
     // Message generator configuration
     void SetupMessageGenerator(float minDensity, float maxDensity, 
@@ -390,16 +393,16 @@ protected:
     virtual void StopApplication(void);
 
 private:
-    void SendMessage(Ptr<NetDevice> dev, Mac48Address dst, const DensityMessage& message);
+    void SendMessage(uint32_t peerIndex, uint32_t nodeId, uint32_t lastNode, float density, uint32_t timestamp);
     void DiscoverPeers(void);
     void OnMessageGenerated(const DensityMessage& message);
-    Mac48Address GetMacFromIpv4(const Ipv4Address& ipv4);
-    bool ReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packet, uint16_t protocol, const Address& src);
+    void ReceiveFromDevice(Ptr<Socket> socket);
 
     Ptr<Socket> m_socket;
     double m_commRange;
     uint16_t m_port;
     std::vector<uint32_t> m_peers;
+    std::map<uint32_t, Ipv4Address> m_nodeToIP;
     std::ofstream m_logFile;
     double m_percentage;
     uint32_t m_nCameraNodes;
@@ -462,6 +465,11 @@ void GossipApp::SetupLogDir(std::string logDir)
     m_logDir = logDir;
 }
 
+void GossipApp::SetNodeToIP(const std::map<uint32_t, Ipv4Address>& nodeToIP)
+{
+    m_nodeToIP = nodeToIP;
+}
+
 void
 GossipApp::SetupMessageGenerator(float minDensity, float maxDensity, 
                                  float deltaDensity, Time minInterval, Time maxInterval)
@@ -475,63 +483,17 @@ GossipApp::SetupMessageGenerator(float minDensity, float maxDensity,
     m_maxInterval = maxInterval;
 }
 
-Mac48Address GossipApp::GetMacFromIpv4(const Ipv4Address& ip)
-{
-    for (uint32_t i = 0; i < m_nCameraNodes; ++i)
-    {
-        Ptr<Node> node = NodeList::GetNode(i);
-        Ptr<Ipv4> ipv4 = node->GetObject<Ipv4>();
-        if (ipv4)
-        {
-            for (uint32_t j = 0; j < ipv4->GetNInterfaces(); ++j)
-            {
-                for (uint32_t k = 0; k < ipv4->GetNAddresses(j); ++k)
-                {
-                    if (ipv4->GetAddress(j, k).GetLocal() == ip)
-                    {
-                        // Found the node and interface
-                        Ptr<NetDevice> dev = node->GetDevice(j);
-                        Mac48Address mac = Mac48Address::ConvertFrom(dev->GetAddress());
-                        // Avoid returning all-zero MAC
-                        if (mac != Mac48Address("00:00:00:00:00:00")) {
-                            return mac;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    // Not found, return broadcast MAC as fallback
-    return Mac48Address("ff:ff:ff:ff:ff:ff");
-}
-
 void GossipApp::DiscoverPeers(void)
 {
     uint32_t myId = GetNode()->GetId();
-    Ptr<MobilityModel> myMob = GetNode()->GetObject<MobilityModel>();
-    Vector myPos = myMob->GetPosition();
-
     m_peers.clear();
-    
-    for (uint32_t i = 0; i < m_nCameraNodes; ++i)
-    {
-        if (i == myId) continue;
-
-        Ptr<Node> peerNode = NodeList::GetNode(i);
-        Ptr<MobilityModel> peerMob = peerNode->GetObject<MobilityModel>();
-        Vector peerPos = peerMob->GetPosition();
-        
-        double dist = CalculateDistance(myPos, peerPos);
-        
-        if (dist <= m_commRange)
-        {
-            m_peers.push_back(i); // Store node index directly
-        }
+    for (const auto& [key, device] : p2pDevices) {
+        size_t dash = key.find('-');
+        uint32_t n1 = std::stoul(key.substr(0, dash));
+        uint32_t n2 = std::stoul(key.substr(dash + 1));
+        if (n1 == myId) m_peers.push_back(n2);
+        else if (n2 == myId) m_peers.push_back(n1);
     }
-
-    NS_LOG_INFO("Node " << myId << " at (" << myPos.x << "," << myPos.y 
-                << ") found " << m_peers.size() << " peers within " 
-                << m_commRange << "m range");
 }
 
 void
@@ -542,18 +504,13 @@ GossipApp::StartApplication(void)
     m_logFile.open(fname, std::ios::out);
     m_logFile << "event,time,node_from,node_to,density,timestamp_ms" << std::endl;
 
+    // Create UDP sockets
+    m_socket = Socket::CreateSocket(GetNode(), UdpSocketFactory::GetTypeId());
+    m_socket->Bind(InetSocketAddress(Ipv4Address::GetAny(), m_port));
+    m_socket->SetRecvCallback(MakeCallback(&GossipApp::ReceiveFromDevice, this));
+
     // Discover peers
     DiscoverPeers();
-
-    Ptr<Node> node = GetNode();
-    for (uint32_t i = 0; i < node->GetNDevices(); ++i)
-    {
-        Ptr<NetDevice> dev = node->GetDevice(i);
-        if (DynamicCast<WifiNetDevice>(dev) != nullptr)  // Only WiFi devices
-        {
-            dev->SetReceiveCallback(MakeCallback(&GossipApp::ReceiveFromDevice, this));
-        }
-    }
 
     // Initialize density knowledge for all nodes
     for (uint32_t i = 0; i < m_nCameraNodes; ++i)
@@ -583,136 +540,101 @@ GossipApp::StartApplication(void)
     m_messageGenerator->Start();
 }
 
-bool GossipApp::ReceiveFromDevice(Ptr<NetDevice> device, Ptr<const Packet> packet, uint16_t protocol, const Address& src)
+void GossipApp::ReceiveFromDevice(Ptr<Socket> socket)
 {
-    uint32_t myId = GetNode()->GetId();
-    double now = Simulator::Now().GetSeconds();
+    Ptr<Packet> packet;
+    Address from;
+    while ((packet = socket->RecvFrom(from))) {
+        uint32_t myId = GetNode()->GetId();
+        double now = Simulator::Now().GetSeconds();
+        Ptr<Packet> copy = packet->Copy();
+        GossipHeader header;
+        copy->RemoveHeader(header);
+        uint32_t senderId = header.GetNodeId();
+        uint32_t lastNode = header.GetLastNode();
 
-    // Copy the packet and remove the header
-    Ptr<Packet> copy = packet->Copy();
-    GossipHeader header;
-    copy->RemoveHeader(header);
-    
-    uint32_t senderId = header.GetNodeId();
-    uint32_t lastNode = header.GetLastNode();
-
-    // Ignore messages from self
-    if (senderId == myId)
-    {
-        NS_LOG_DEBUG("Node " << myId << " ignoring self-message");
-        return true;
-    }
-
-    // Log recv event to CSV
-    m_logFile << "recv," << now << "," << senderId << "," << myId << ","
-              << header.GetDensity() << "," << header.GetTimestamp() << std::endl;
-
-    NS_LOG_INFO("Node " << myId << " received message from node " << senderId
-                << " (density=" << header.GetDensity()
-                << ", timestamp=" << header.GetTimestamp() << " ms) at " << now << "s");
-
-    // Update density knowledge for the sender node
-    if (m_densityKnowledge.find(senderId) != m_densityKnowledge.end())
-    {
-        // Check if the new timestamp is newer than existing ones
-        uint32_t maxExistingTimestamp = 0;
-        for (const auto& entry : m_densityKnowledge[senderId])
-        {
-            if (entry.second > maxExistingTimestamp)
-            {
-                maxExistingTimestamp = entry.second;
-            }
+        // Ignore messages from self
+        if (senderId == myId) {
+            NS_LOG_DEBUG("Node " << myId << " ignoring self-message");
+            return;
         }
 
-        if (header.GetTimestamp() > maxExistingTimestamp)
-        {
-            // Update knowledge
-            m_densityKnowledge[senderId].push_back({header.GetDensity(), header.GetTimestamp()});
-            // Keep only the last 5 entries
-            if (m_densityKnowledge[senderId].size() > 5)
-            {
-                m_densityKnowledge[senderId].pop_front();
-            }
-            NS_LOG_DEBUG("Node " << myId << " updated knowledge for node " << senderId 
-                         << ": density=" << header.GetDensity() << ", timestamp=" << header.GetTimestamp());
+        // Log recv event to CSV
+        m_logFile << "recv," << now << "," << senderId << "," << myId << ","
+                  << header.GetDensity() << "," << header.GetTimestamp() << std::endl;
 
-            // Log update event to CSV
-            m_logFile << "update," << now << "," << senderId << "," << myId << ","
-                      << header.GetDensity() << "," << header.GetTimestamp() << std::endl;
+        NS_LOG_INFO("Node " << myId << " received message from node " << senderId
+                    << " (density=" << header.GetDensity()
+                    << ", timestamp=" << header.GetTimestamp() << " ms) at " << now << "s");
 
-            NS_LOG_INFO("Node " << myId << " got a message from " << lastNode);
-            // Prepare list of peers excluding sender and self
-            std::vector<uint32_t> shuffledPeers;
-            shuffledPeers.reserve(m_peers.size());
-            for (auto peer : m_peers) {
-                if (peer != lastNode && peer != myId) {
-                    shuffledPeers.push_back(peer);
+        // Update density knowledge for the sender node
+        if (m_densityKnowledge.find(senderId) != m_densityKnowledge.end()) {
+            // Check if the new timestamp is newer than existing ones
+            uint32_t maxExistingTimestamp = 0;
+            for (const auto& entry : m_densityKnowledge[senderId]) {
+                if (entry.second > maxExistingTimestamp) {
+                    maxExistingTimestamp = entry.second;
                 }
             }
 
-            if (shuffledPeers.empty()) {
-                NS_LOG_DEBUG("Node " << myId << " has no peers to propagate to after excluding sender and self");
-                return true;
-            }
+            if (header.GetTimestamp() > maxExistingTimestamp) {
+                // Update knowledge
+                m_densityKnowledge[senderId].push_back({header.GetDensity(), header.GetTimestamp()});
+                // Keep only the last 5 entries
+                if (m_densityKnowledge[senderId].size() > 5) {
+                    m_densityKnowledge[senderId].pop_front();
+                }
+                NS_LOG_DEBUG("Node " << myId << " updated knowledge for node " << senderId 
+                             << ": density=" << header.GetDensity() << ", timestamp=" << header.GetTimestamp());
 
-            // Propagate the update to a percentage of neighbors (excluding the sender, and self)
-            double percentage = m_percentage;
-            size_t nPeers = shuffledPeers.size();
-            size_t nToSend = static_cast<size_t>(std::ceil(percentage * nPeers));
-            if (nToSend == 0 && nPeers > 0) nToSend = 1;
-            
-            // Shuffle peers
-            std::random_device rd;
-            std::mt19937 g(rd());
-            std::shuffle(shuffledPeers.begin(), shuffledPeers.end(), g);
+                // Log update event to CSV
+                m_logFile << "update," << now << "," << senderId << "," << myId << ","
+                          << header.GetDensity() << "," << header.GetTimestamp() << std::endl;
 
-            size_t limit = std::min(nToSend, shuffledPeers.size());
-            size_t sentCount = 0;
-
-            Ptr<Node> node = GetNode();
-            for (uint32_t i = 0; i < node->GetNDevices(); ++i)
-            {
-                Ptr<NetDevice> dev = node->GetDevice(i);
-                // Only use WiFiNetDevice
-                if (DynamicCast<WifiNetDevice>(dev) == nullptr)
-                    continue;
-
-                for (size_t idx = 0; idx < limit && sentCount < limit; ++idx)
-                {
-                    uint32_t peerIndex = shuffledPeers[idx];
-
-                    Ptr<Node> peerNode = NodeList::GetNode(peerIndex);
-                    Ptr<NetDevice> peerDev;
-                    for (uint32_t j = 0; j < peerNode->GetNDevices(); ++j) {
-                        if (DynamicCast<WifiNetDevice>(peerNode->GetDevice(j)) != nullptr) {
-                            peerDev = peerNode->GetDevice(j);
-                            break;
-                        }
+                NS_LOG_INFO("Node " << myId << " got a message from " << lastNode);
+                // Prepare list of peers excluding sender and self
+                std::vector<uint32_t> shuffledPeers;
+                shuffledPeers.reserve(m_peers.size());
+                for (auto peer : m_peers) {
+                    if (peer != lastNode && peer != myId) {
+                        shuffledPeers.push_back(peer);
                     }
-                    if (!peerDev) continue; // No WiFi device found, skip
+                }
 
-                    Mac48Address dstMac = Mac48Address::ConvertFrom(peerDev->GetAddress());
-                    Mac48Address myMac = Mac48Address::ConvertFrom(dev->GetAddress());
-                    if (dstMac == myMac) continue; // Skip self
+                if (shuffledPeers.empty()) {
+                    NS_LOG_DEBUG("Node " << myId << " has no peers to propagate to after excluding sender and self");
+                    return;
+                }
 
-                    // Create DensityMessage from header for sending
-                    DensityMessage messageToSend(header.GetNodeId(), header.GetDensity(), header.GetTimestamp());
-                    SendMessage(dev, dstMac, messageToSend);
+                // Propagate the update to a percentage of neighbors (excluding the sender, and self)
+                double percentage = m_percentage;
+                size_t nPeers = shuffledPeers.size();
+                size_t nToSend = static_cast<size_t>(std::ceil(percentage * nPeers));
+                if (nToSend == 0 && nPeers > 0) nToSend = 1;
+                
+                // Shuffle peers
+                std::random_device rd;
+                std::mt19937 g(rd());
+                std::shuffle(shuffledPeers.begin(), shuffledPeers.end(), g);
+
+                size_t limit = std::min(nToSend, shuffledPeers.size());
+                size_t sentCount = 0;
+
+                for (size_t idx = 0; idx < limit && sentCount < limit; ++idx) {
+                    uint32_t peerIndex = shuffledPeers[idx];
+                    SendMessage(peerIndex, header.GetNodeId(), header.GetLastNode(), header.GetDensity(), header.GetTimestamp());
                 }
             }
-        }
-        else
-        {
-            NS_LOG_DEBUG("Node " << myId << " received outdated message from node " << senderId 
-                        << " (timestamp=" << header.GetTimestamp() << " <= max=" << maxExistingTimestamp << "), dropping");
+            else {
+                NS_LOG_DEBUG("Node " << myId << " received outdated message from node " << senderId 
+                            << " (timestamp=" << header.GetTimestamp() << " <= max=" << maxExistingTimestamp << "), dropping");
 
-            // Log drop event to CSV
-            m_logFile << "drop," << now << "," << senderId << "," << myId << ","
-                    << header.GetDensity() << "," << header.GetTimestamp() << std::endl;
+                // Log drop event to CSV
+                m_logFile << "drop," << now << "," << senderId << "," << myId << ","
+                        << header.GetDensity() << "," << header.GetTimestamp() << std::endl;
+            }
         }
     }
-
-    return true; // Indicate packet was handled
 }
 
 void GossipApp::StopApplication(void)
@@ -804,36 +726,16 @@ void GossipApp::OnMessageGenerated(const DensityMessage& message)
     std::mt19937 g(rd());
     std::shuffle(shuffledPeers.begin(), shuffledPeers.end(), g);
 
-    Ptr<Node> node = GetNode();
-    for (uint32_t i = 0; i < node->GetNDevices(); ++i)
+    uint32_t lastNode = GetNode()->GetId();  // Define lastNode
+
+    for (size_t idx = 0; idx < nToSend; ++idx)
     {
-        Ptr<NetDevice> dev = node->GetDevice(i);
-        // Only use WiFiNetDevice
-        if (DynamicCast<WifiNetDevice>(dev) == nullptr)
-            continue;
-
-        for (size_t idx = 0; idx < nToSend; ++idx)
-        {
-            uint32_t peerIndex = shuffledPeers[idx];
-            Ptr<Node> peerNode = NodeList::GetNode(peerIndex);
-            Ptr<NetDevice> peerDev;
-            for (uint32_t j = 0; j < peerNode->GetNDevices(); ++j) {
-                if (DynamicCast<WifiNetDevice>(peerNode->GetDevice(j)) != nullptr) {
-                    peerDev = peerNode->GetDevice(j);
-                    break;
-                }
-            }
-            if (!peerDev) continue; // No WiFi device found, skip
-
-            Mac48Address dstMac = Mac48Address::ConvertFrom(peerDev->GetAddress());
-            Mac48Address myMac = Mac48Address::ConvertFrom(dev->GetAddress());
-            if (dstMac == myMac) continue;
-            SendMessage(dev, dstMac, message);
-        }
+        uint32_t peerIndex = shuffledPeers[idx];
+        SendMessage(peerIndex, message.nodeId, lastNode, message.reading.density, message.reading.timestamp);
     }
 }
 
-void GossipApp::SendMessage(Ptr<NetDevice> dev, Mac48Address dst, const DensityMessage& message)
+void GossipApp::SendMessage(uint32_t peerIndex, uint32_t nodeId, uint32_t lastNode, float density, uint32_t timestamp)
 {
     if (m_peers.empty())
     {
@@ -841,25 +743,20 @@ void GossipApp::SendMessage(Ptr<NetDevice> dev, Mac48Address dst, const DensityM
         return;
     }
 
-    uint32_t lastNode = GetNode()->GetId();
-
     // Create packet and add custom header
     Ptr<Packet> packet = Create<Packet>();
-    GossipHeader header(message.nodeId, lastNode, message.reading.density, message.reading.timestamp);
+    GossipHeader header(nodeId, lastNode, density, timestamp);
     packet->AddHeader(header);
 
-    uint16_t ethertype = 0x88B5;
-
-    Mac48Address macAddr = Mac48Address::ConvertFrom(dev->GetAddress());
+    Ipv4Address peerIP = m_nodeToIP[peerIndex];
+    m_socket->SendTo(packet, 0, InetSocketAddress(peerIP, m_port));
 
     // Log send event to CSV
     double now = Simulator::Now().GetSeconds();
-    m_logFile << "send," << now << "," << GetNode()->GetId() << "," << dst << ","
-              << message.reading.density << "," << message.reading.timestamp << std::endl;
+    m_logFile << "send," << now << "," << GetNode()->GetId() << "," << peerIndex << ","
+              << density << "," << timestamp << std::endl;
 
-    dev->Send(packet, dst, ethertype);
-
-    NS_LOG_INFO("Packet sent from " << macAddr << " to " << dst);
+    NS_LOG_INFO("Packet sent to node " << peerIndex << " at IP " << peerIP);
 }
 
 
@@ -878,6 +775,8 @@ public:
                                 Time minInterval, 
                                 Time maxInterval);
     
+    void SetNodeToIP(const std::map<uint32_t, Ipv4Address>& nodeToIP);
+    
     ApplicationContainer Install(NodeContainer c);
     ApplicationContainer Install(Ptr<Node> node);
 
@@ -887,6 +786,7 @@ private:
     uint16_t m_port;
     std::string m_logDir;
     uint32_t m_nCameraNodes;
+    std::map<uint32_t, Ipv4Address> m_nodeToIP;
     
     // Message generator parameters
     float m_minDensity;
@@ -895,6 +795,8 @@ private:
     Time m_minInterval;
     Time m_maxInterval;
     bool m_useMessageGenerator;
+
+    void SendMessage(uint32_t peerIndex, uint32_t nodeId, uint32_t lastNode, float density, uint32_t timestamp);
 };
 
 GossipAppHelper::GossipAppHelper(double range, uint16_t port, std::string logDir, double percentage, uint32_t nCameraNodes)
@@ -926,6 +828,11 @@ void GossipAppHelper::SetMessageGenerator(float minDensity,
     m_useMessageGenerator = true;
 }
 
+void GossipAppHelper::SetNodeToIP(const std::map<uint32_t, Ipv4Address>& nodeToIP)
+{
+    m_nodeToIP = nodeToIP;
+}
+
 ApplicationContainer
 GossipAppHelper::Install(NodeContainer c)
 {
@@ -943,6 +850,7 @@ GossipAppHelper::Install(Ptr<Node> node)
     Ptr<GossipApp> app = CreateObject<GossipApp>();
     app->Setup(m_range, m_port, m_percentage, m_nCameraNodes);
     app->SetupLogDir(m_logDir);
+    app->SetNodeToIP(m_nodeToIP);
     
     if (m_useMessageGenerator)
     {
@@ -980,7 +888,6 @@ NodeContainer CreateCameraNodes() {
 void SetCameraMobility(uint8_t node, NodeContainer& camera_nodes) {
     NS_LOG_INFO("Setting camera node mobility");
     double radius = 200.0;         // radius of disc
-    double wifiRange = 50.0;       // Wi-Fi range
     double centerX = 0.0;
     double centerY = 0.0;
 
@@ -1110,6 +1017,67 @@ NetDeviceContainer WifiStack(NodeContainer& nodes){
     return devices;
 } 
 
+std::map<std::string, NetDeviceContainer>& pointToPointEther(NodeContainer& nodes){
+    // Find the neighbor within communication range from placement.json
+    const char* file = "scratch/placement.json";
+    double commRange = 50.0;
+
+    // Call Python script to calculate neighbors
+    std::string command = "python3 scratch/calculate_neighbors.py " + std::to_string((int)commRange) + " " + file + " neighbors.json";
+    int result = system(command.c_str());
+    
+    if (result == 0) {
+        NS_LOG_UNCOND("Successfully calculated neighbors and saved to neighbors.json");
+    } else {
+        NS_LOG_UNCOND("Error running calculate_neighbors.py");
+    }
+    
+    // Read neighbors from neighbors.json
+    std::ifstream inFile("neighbors.json");
+    nlohmann::json neighborsJson;
+    inFile >> neighborsJson;
+    inFile.close();
+    
+    // Set up point-to-point links based on neighbors
+    for (auto& [nodeId, neighborList] : neighborsJson.items()) {
+        uint32_t nodeIndex = std::stoi(nodeId);
+        Ptr<Node> node = nodes.Get(nodeIndex);
+        for (auto& neighborId : neighborList) {
+            uint32_t neighborIndex = neighborId.get<uint32_t>();
+            
+            // Create unique key with smaller ID first
+            uint32_t minId = std::min(nodeIndex, neighborIndex);
+            uint32_t maxId = std::max(nodeIndex, neighborIndex);
+            std::string key = std::to_string(minId) + "-" + std::to_string(maxId);
+            
+            // Skip if link already exists
+            if (p2pDevices.find(key) != p2pDevices.end()) {
+                continue;
+            }
+            
+            Ptr<Node> neighborNode = nodes.Get(neighborIndex);
+            
+            // Set up point-to-point link between node and neighborNode
+            PointToPointHelper p2p;
+            p2p.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
+            p2p.SetChannelAttribute("Delay", StringValue("2ms"));
+            NetDeviceContainer devices = p2p.Install(node, neighborNode);
+            
+            // Store devices in global map
+            p2pDevices[key] = devices;
+            
+            NS_LOG_UNCOND("Established point-to-point link between Node " << nodeIndex << " and Node " << neighborIndex);
+        }
+    }
+    
+    // Print map
+    for (const auto& [key, devices] : p2pDevices) {
+        NS_LOG_UNCOND("Link: " << key << " with " << devices.GetN() << " devices");
+    }
+    NS_LOG_INFO("Point-to-point links established based on neighbors");
+    
+    return p2pDevices;
+}
 
 void TxCallback(Ptr<const Packet> packet)
 {
@@ -1128,6 +1096,59 @@ void animationSetup(AnimationInterface& anim, NodeContainer camera, NodeContaine
 
 }
 
+void sendPacket(Ptr<NetDevice> device){
+    Ptr<Packet> packet = Create<Packet>(512);
+    device->Send(packet, device->GetBroadcast(), 0x0800);
+    NS_LOG_UNCOND("Packet sent from device " << device->GetIfIndex() );
+}
+
+/*
+int main(int argc, char *argv[]) {
+    LogComponentEnable("First", LOG_LEVEL_INFO);
+    // Log the program start
+    NS_LOG_UNCOND("Starting program");
+
+
+    NodeContainer camera_nodes = CreateCameraNodes();
+    //Log the number of camera nodes created
+    NS_LOG_INFO("Created " << camera_nodes.GetN() << " camera nodes");
+    NodeContainer mobile_nodes = CreateMobileNodes();
+
+    pointToPointEther(camera_nodes);
+
+
+    AnimationInterface anim("test-netanim.xml");
+    anim.EnablePacketMetadata();
+    animationSetup(anim, camera_nodes, mobile_nodes);
+    
+    // send packet on point-to-point links
+
+    Ptr<Node> srcNode = camera_nodes.Get(0); // First camera node as source
+    Ptr<NetDevice> srcDevice = srcNode->GetDevice(0); // First device of source node
+    Simulator::Schedule(Seconds(0.5), &sendPacket, srcDevice);
+    Ptr<NetDevice> srcDevice2 = srcNode->GetDevice(1); // First device of source node
+    Simulator::Schedule(Seconds(1.0), &sendPacket, srcDevice2);
+
+    Ptr<Node> srcNode3 = camera_nodes.Get(1); // First camera node as source
+    Ptr<NetDevice> srcDevice3 = srcNode3->GetDevice(1); // First device of source node
+    Simulator::Schedule(Seconds(1.5), &sendPacket, srcDevice3);
+
+    Ptr<Node> testnode = camera_nodes.Get(49); // First camera node as source
+    Mac48Address testmac = Mac48Address::ConvertFrom(testnode->GetDevice(0)->GetAddress());
+    NS_LOG_UNCOND("Test Node ID: " << testnode->GetId() << " MAC: " << testmac);
+    NS_LOG_UNCOND("Number of devices: " << testnode->GetNDevices());
+    for (uint32_t i = 0; i < testnode->GetNDevices(); ++i)
+    {
+        Ptr<NetDevice> dev = testnode->GetDevice(i);
+        NS_LOG_UNCOND("Node Device " << testnode->GetId() << " MAC: " << Mac48Address::ConvertFrom(dev->GetAddress()));
+    }
+
+    Simulator::Run();
+    Simulator::Destroy();
+    return 0;
+}
+
+*/
 
 int main(int argc, char *argv[])
 {
@@ -1171,6 +1192,35 @@ int main(int argc, char *argv[])
     NodeContainer mobile_nodes = CreateMobileNodes();
     NetDeviceContainer devices = WifiStack(camera_nodes);
 
+    pointToPointEther(camera_nodes);
+
+    InternetStackHelper internet;
+    internet.Install(camera_nodes);
+    internet.Install(mobile_nodes);
+
+    Ipv4AddressHelper address;
+    std::map<uint32_t, Ipv4Address> nodeToIP;
+    int subnetIndex = 0;
+    for (auto& [key, devices] : p2pDevices) {
+        std::ostringstream subnet;
+        subnet << "10." << (subnetIndex / 256) << "." << (subnetIndex % 256) << ".0";
+        address.SetBase(subnet.str().c_str(), "255.255.255.0");
+        Ipv4InterfaceContainer interfaces = address.Assign(devices);
+        subnetIndex++;
+    }
+    
+    // Build IP mapping for gossip app
+    for (uint32_t i = 0; i < camera_nodes.GetN(); ++i) {
+        Ptr<Node> node = camera_nodes.Get(i);
+        Ptr<Ipv4> ipv4 = node->GetObject<Ipv4>();
+        // Use the first non-loopback interface address
+        for (uint32_t j = 1; j < ipv4->GetNInterfaces(); ++j) {
+            Ipv4Address addr = ipv4->GetAddress(j, 0).GetLocal();
+            nodeToIP[i] = addr;
+            break;
+        }
+    }
+
     // Get current date and time
     auto now = std::chrono::system_clock::now();
     auto time_t = std::chrono::system_clock::to_time_t(now);
@@ -1187,6 +1237,7 @@ int main(int argc, char *argv[])
     GossipAppHelper gossipApp(commRange, 9 , logDir, percentage, camera_nodes.GetN());
     gossipApp.SetMessageGenerator(minDensity, maxDensity, deltaDensity,
                                   Seconds(minInterval), Seconds(maxInterval));
+    gossipApp.SetNodeToIP(nodeToIP);
     
     ApplicationContainer apps = gossipApp.Install(camera_nodes);
     apps.Start(Seconds(1.0));
