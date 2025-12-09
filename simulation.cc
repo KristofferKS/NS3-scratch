@@ -19,6 +19,7 @@
 #include <chrono>
 #include <sstream>
 #include <iomanip> 
+#include "ns3/point-to-point-module.h"
 
 using namespace std;
 
@@ -378,6 +379,7 @@ public:
 
     void Setup(double range, uint16_t port, double percentage, uint32_t nCameraNodes);
     void SetupLogDir(std::string logDir);
+    //void SetNodeToIP(const std::map<uint32_t, Ipv4Address>& nodeToIP);
     
     // Message generator configuration
     void SetupMessageGenerator(float minDensity, float maxDensity, 
@@ -993,18 +995,21 @@ void SetCameraMobility(uint8_t node, NodeContainer& camera_nodes) {
     std::string placement;
 
     if (stat(node_file, &sb) == 0){
+
         // Read from the text file
-        std::ifstream MyReadFile(node_file);
+        ifstream MyReadFile(node_file);
 
         // Use a while loop together with the getline() function to read the file line by line
         while (getline (MyReadFile, placement)) {
-            // Output the text from the file
-            std::cout << placement;
+        // Output the text from the file
+        cout << placement;
         }
 
         // Close the file
         MyReadFile.close();
+
     }
+
     else{
         std::string command = "python3 scratch/node_placement.py " + std::to_string(node) + " " + std::to_string(wifiRange) + " " + std::to_string(centerX) + " " + std::to_string(centerY) + " " + std::to_string(radius);
         // Read positions from file
@@ -1020,29 +1025,15 @@ void SetCameraMobility(uint8_t node, NodeContainer& camera_nodes) {
 
         pclose(pipe);
         std::cout << "Python returned: " << placement << std::endl;
+
     }
 
     auto nodes = nlohmann::json::parse(placement);
 
-    // Create a new JSON with 0-indexed keys (convert from 1-50 to 0-49)
-    nlohmann::json reindexedNodes;
-    
-    for (auto& [key, value] : nodes.items()) {
-        uint32_t oldId = std::stoi(key);
-        uint32_t newId = oldId - 1;  // Convert 1-50 to 0-49
-        reindexedNodes[std::to_string(newId)] = value;
-    }
-    
-    // Overwrite placement.json with 0-indexed version
-    std::ofstream outFile("/placement.json");
-    outFile << reindexedNodes.dump(4);  // Pretty print with 4 spaces
-    outFile.close();
-    NS_LOG_UNCOND("Rewrote placement.json with 0-indexed keys (0-49)");
-
     // Create a vector of (nodeId, position) pairs and sort by nodeId numerically
     std::vector<std::pair<uint32_t, std::pair<double, double>>> sortedNodes;
     
-    for (auto& [key, value] : reindexedNodes.items()) {
+    for (auto& [key, value] : nodes.items()) {
         uint32_t nodeId = std::stoi(key);
         double x = value[0];
         double y = value[1];
@@ -1119,45 +1110,6 @@ NetDeviceContainer WifiStack(NodeContainer& nodes){
     return devices;
 } 
 
-/*
-void pointToPointEther(NodeContainer& nodes){
-    // Find the neighbor within communication range from placement.json
-    const char* file = "placement.json";
-    double commRange = 50.0;
-
-    // Call Python script to calculate neighbors
-    std::string command = "python3 calculate_neighbors.py " + std::to_string((int)commRange) + " " + file + " neighbors.json";
-    int result = system(command.c_str());
-    
-    if (result == 0) {
-        NS_LOG_UNCOND("Successfully calculated neighbors and saved to neighbors.json");
-    } else {
-        NS_LOG_UNCOND("Error running calculate_neighbors.py");
-    }
-    
-    // Read neighbors from neighbors.json
-    std::ifstream inFile("neighbors.json");
-    nlohmann::json neighborsJson;
-    inFile >> neighborsJson;
-    inFile.close();
-    // Set up point-to-point links based on neighbors
-    for (auto& [nodeId, neighborList] : neighborsJson.items()) {
-        uint32_t nodeIndex = std::stoi(nodeId);
-        Ptr<Node> node = nodes.GetNode(nodeIndex);
-        for (auto& neighborId : neighborList) {
-            uint32_t neighborIndex = neighborId.get<uint32_t>();
-            Ptr<Node> neighborNode = nodes.GetNode(neighborIndex);
-            // Set up point-to-point link between node and neighborNode
-            PointToPointHelper p2p;
-            p2p.SetDeviceAttribute("DataRate", StringValue("5Mbps"));
-            p2p.SetChannelAttribute("Delay", StringValue("2ms"));
-            NetDeviceContainer devices = p2p.Install(node, neighborNode);
-            NS_LOG_UNCOND("Established point-to-point link between Node " << nodeIndex << " and Node " << neighborIndex);
-        }
-
-    }
-}
-*/
 
 void TxCallback(Ptr<const Packet> packet)
 {
@@ -1175,6 +1127,7 @@ void animationSetup(AnimationInterface& anim, NodeContainer camera, NodeContaine
     }
 
 }
+
 
 int main(int argc, char *argv[])
 {

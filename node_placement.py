@@ -53,7 +53,7 @@ def add_node(event):
             node_ID = m.create_oval(x-radius, y-radius, x+radius, y+radius, fill="red")
             
             # Save the coordinates and tags
-            node_tag = f"{len(nodes)+1}"
+            node_tag = f"{len(nodes)}"  # Start from 0
             m.addtag_withtag(node_tag, node_ID)
             m.addtag_withtag("oval", node_ID)
             
@@ -156,12 +156,16 @@ def finish_placement():
         y_meters = (py / SCALE) - grid_range
         output_nodes[node_tag] = [x_meters, y_meters]
     
+    # Sort by node ID (numerically) before saving
+    sorted_output = {k: output_nodes[k] for k in sorted(output_nodes.keys(), key=int)}
+
+    
     # Save to file
     with open("placement.json", "w") as f:
-        f.write(json.dumps(output_nodes))
+        f.write(json.dumps(sorted_output))
     
     # Print to stdout for C++ to read
-    print(json.dumps(output_nodes))
+    print(json.dumps(sorted_output))
     
     m.quit()
 
