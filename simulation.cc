@@ -748,7 +748,18 @@ void GossipApp::SendMessage(uint32_t peerIndex, uint32_t nodeId, uint32_t lastNo
     GossipHeader header(nodeId, lastNode, density, timestamp);
     packet->AddHeader(header);
 
-    Ipv4Address peerIP = m_nodeToIP[peerIndex];
+    // Get the correct IP for this specific link
+    uint32_t myId = GetNode()->GetId();
+    uint32_t minId = std::min(myId, peerIndex);
+    uint32_t maxId = std::max(myId, peerIndex);
+    auto it = linkIPs.find({minId, maxId});
+    if (it == linkIPs.end())
+    {
+        NS_LOG_ERROR("No IP found for link between " << myId << " and " << peerIndex << ", skipping send");
+        return;
+    }
+    Ipv4Address peerIP = (myId == minId) ? it->second.second : it->second.first;
+
     m_socket->SendTo(packet, 0, InetSocketAddress(peerIP, m_port));
 
     // Log send event to CSV
@@ -888,6 +899,7 @@ NodeContainer CreateCameraNodes() {
 void SetCameraMobility(uint8_t node, NodeContainer& camera_nodes) {
     NS_LOG_INFO("Setting camera node mobility");
     double radius = 200.0;         // radius of disc
+    double wifiRange = 50.0;      // communication range
     double centerX = 0.0;
     double centerY = 0.0;
 
@@ -1044,6 +1056,8 @@ std::map<std::string, NetDeviceContainer>& pointToPointEther(NodeContainer& node
         Ptr<Node> node = nodes.Get(nodeIndex);
         for (auto& neighborId : neighborList) {
             uint32_t neighborIndex = neighborId.get<uint32_t>();
+            
+            if (neighborIndex == nodeIndex) continue;  // Skip self-links
             
             // Create unique key with smaller ID first
             uint32_t minId = std::min(nodeIndex, neighborIndex);
@@ -1207,6 +1221,19 @@ int main(int argc, char *argv[])
         address.SetBase(subnet.str().c_str(), "255.255.255.0");
         Ipv4InterfaceContainer interfaces = address.Assign(devices);
         subnetIndex++;
+        
+        // Store IPs
+        try {
+            size_t dash = key.find('-');
+            uint32_t n1 = std::stoul(key.substr(0, dash));
+            uint32_t n2 = std::stoul(key.substr(dash + 1));
+            Ipv4Address ip1 = interfaces.GetAddress(0);
+            Ipv4Address ip2 = interfaces.GetAddress(1);
+            linkIPs[{n1, n2}] = {ip1, ip2};
+            linkIPs[{n2, n1}] = {ip2, ip1};
+        } catch (const std::exception& e) {
+            NS_LOG_ERROR("Failed to parse key " << key << " or assign IPs: " << e.what());
+        }
     }
     
     // Build IP mapping for gossip app
