@@ -163,24 +163,24 @@ public:
         m_randomDensity->SetAttribute("Min", DoubleValue(minDensity));
         m_randomDensity->SetAttribute("Max", DoubleValue(maxDensity));
         m_currentDensity = m_randomDensity->GetValue();
-
+/*
         NS_LOG_INFO("MessageGenerator setup for node " << nodeId 
                     << " - Density range: [" << minDensity << ", " << maxDensity 
                     << "], Delta: " << deltaDensity
                     << ", Interval range: [" << minInterval.GetSeconds() 
-                    << "s, " << maxInterval.GetSeconds() << "s]");
+                    << "s, " << maxInterval.GetSeconds() << "s]");*/
     }
 
     void Start()
     {
         if (m_running)
         {
-            NS_LOG_WARN("MessageGenerator already running for node " << m_nodeId);
+            //NS_LOG_WARN("MessageGenerator already running for node " << m_nodeId);
             return;
         }
 
         m_running = true;
-        NS_LOG_INFO("MessageGenerator started for node " << m_nodeId);
+        //NS_LOG_INFO("MessageGenerator started for node " << m_nodeId);
         
         // Schedule first message with a small random delay to avoid collisions
         Time initialDelay = MilliSeconds(m_randomInterval->GetInteger(0, 500));
@@ -198,7 +198,7 @@ public:
             Simulator::Cancel(m_generateEvent);
         }
 
-        NS_LOG_INFO("MessageGenerator stopped for node " << m_nodeId);
+        //NS_LOG_INFO("MessageGenerator stopped for node " << m_nodeId);
     }
 
     void SetMessageGeneratedCallback(MessageGeneratedCallback callback)
@@ -222,9 +222,9 @@ private:
 
         // Create message
         m_lastMessage = DensityMessage(m_nodeId, newDensity, timestamp);
-
+/*
         NS_LOG_INFO("Node " << m_nodeId << " generated message: density=" 
-                    << newDensity << ", timestamp=" << timestamp << "ms");
+                    << newDensity << ", timestamp=" << timestamp << "ms");*/
 
         // Invoke callback if set
         if (!m_messageCallback.IsNull())
@@ -245,9 +245,9 @@ private:
 
         Time nextInterval = GetRandomInterval();
         m_generateEvent = Simulator::Schedule(nextInterval, &MessageGenerator::GenerateMessage, this);
-
+/*
         NS_LOG_DEBUG("Node " << m_nodeId << " scheduled next message in " 
-                     << nextInterval.GetSeconds() << "s");
+                     << nextInterval.GetSeconds() << "s");*/
     }
 
     Time GetRandomInterval()
@@ -273,11 +273,11 @@ private:
         m_randomDensity->SetAttribute("Max", DoubleValue(maxAllowed));
         
         float newDensity = m_randomDensity->GetValue();
-
+/*
         NS_LOG_DEBUG("Node " << m_nodeId << " density: " << m_currentDensity 
                      << " -> " << newDensity 
                      << " (allowed range: [" << minAllowed << ", " << maxAllowed << "])");
-
+*/
         return newDensity;
     }
 
@@ -547,6 +547,10 @@ void GossipApp::ReceiveFromDevice(Ptr<Socket> socket)
     while ((packet = socket->RecvFrom(from))) {
         uint32_t myId = GetNode()->GetId();
         double now = Simulator::Now().GetSeconds();
+
+        InetSocketAddress inetAddr = InetSocketAddress::ConvertFrom(from);
+        NS_LOG_INFO("Node " << myId << " received packet from IP " << inetAddr.GetIpv4() << " at time " << now);
+
         Ptr<Packet> copy = packet->Copy();
         GossipHeader header;
         copy->RemoveHeader(header);
@@ -555,18 +559,18 @@ void GossipApp::ReceiveFromDevice(Ptr<Socket> socket)
 
         // Ignore messages from self
         if (senderId == myId) {
-            NS_LOG_DEBUG("Node " << myId << " ignoring self-message");
-            return;
+            //NS_LOG_DEBUG("Node " << myId << " ignoring self-message");
+            continue;
         }
 
         // Log recv event to CSV
         m_logFile << "recv," << now << "," << senderId << "," << myId << ","
                   << header.GetDensity() << "," << header.GetTimestamp() << endl;
-
+/*
         NS_LOG_INFO("Node " << myId << " received message from node " << senderId
                     << " (density=" << header.GetDensity()
                     << ", timestamp=" << header.GetTimestamp() << " ms) at " << now << "s");
-
+*/
         // Update density knowledge for the sender node
         if (m_densityKnowledge.find(senderId) != m_densityKnowledge.end()) {
             // Check if the new timestamp is newer than existing ones
@@ -583,15 +587,15 @@ void GossipApp::ReceiveFromDevice(Ptr<Socket> socket)
                 // Keep only the last 5 entries
                 if (m_densityKnowledge[senderId].size() > 5) {
                     m_densityKnowledge[senderId].pop_front();
-                }
+                }/*
                 NS_LOG_DEBUG("Node " << myId << " updated knowledge for node " << senderId 
                              << ": density=" << header.GetDensity() << ", timestamp=" << header.GetTimestamp());
-
+*/
                 // Log update event to CSV
                 m_logFile << "update," << now << "," << senderId << "," << myId << ","
                           << header.GetDensity() << "," << header.GetTimestamp() << endl;
 
-                NS_LOG_INFO("Node " << myId << " got a message from " << lastNode);
+                //NS_LOG_INFO("Node " << myId << " got a message from " << lastNode);
                 // Prepare list of peers excluding sender and self
                 vector<uint32_t> shuffledPeers;
                 shuffledPeers.reserve(m_peers.size());
@@ -602,8 +606,8 @@ void GossipApp::ReceiveFromDevice(Ptr<Socket> socket)
                 }
 
                 if (shuffledPeers.empty()) {
-                    NS_LOG_DEBUG("Node " << myId << " has no peers to propagate to after excluding sender and self");
-                    return;
+                    //NS_LOG_DEBUG("Node " << myId << " has no peers to propagate to after excluding sender and self");
+                    continue;  // Continue to next packet, don't exit the loop
                 }
 
                 // Propagate the update to a percentage of neighbors (excluding the sender, and self)
@@ -625,10 +629,10 @@ void GossipApp::ReceiveFromDevice(Ptr<Socket> socket)
                     SendMessage(peerIndex, header.GetNodeId(), myId, header.GetDensity(), header.GetTimestamp());
                 }
             }
-            else {
+            else {/*
                 NS_LOG_DEBUG("Node " << myId << " received outdated message from node " << senderId 
                             << " (timestamp=" << header.GetTimestamp() << " <= max=" << maxExistingTimestamp << "), dropping");
-
+*/
                 // Log drop event to CSV
                 m_logFile << "drop," << now << "," << senderId << "," << myId << ","
                         << header.GetDensity() << "," << header.GetTimestamp() << endl;
@@ -703,11 +707,11 @@ void GossipApp::StopApplication(void)
 }
 
 void GossipApp::OnMessageGenerated(const DensityMessage& message)
-{
+{/*
     NS_LOG_INFO("Node " << GetNode()->GetId() 
                 << " received new message from generator: density=" 
                 << message.reading.density << ", timestamp=" 
-                << message.reading.timestamp << "ms");
+                << message.reading.timestamp << "ms");*/
 
     double now = Simulator::Now().GetSeconds();
 
@@ -739,7 +743,7 @@ void GossipApp::SendMessage(uint32_t peerIndex, uint32_t nodeId, uint32_t lastNo
 {
     if (m_peers.empty())
     {
-        NS_LOG_WARN("Node " << GetNode()->GetId() << " has no peers to send to");
+        //NS_LOG_WARN("Node " << GetNode()->GetId() << " has no peers to send to");
         return;
     }
 
@@ -750,15 +754,16 @@ void GossipApp::SendMessage(uint32_t peerIndex, uint32_t nodeId, uint32_t lastNo
 
     // Get the correct IP for this specific link
     uint32_t myId = GetNode()->GetId();
-    uint32_t minId = min(myId, peerIndex);
-    uint32_t maxId = max(myId, peerIndex);
-    auto it = linkIPs.find({minId, maxId});
+    // linkIPs[{myId, peerIndex}] = {myIP, peerIP}
+    auto it = linkIPs.find({myId, peerIndex});
     if (it == linkIPs.end())
     {
         NS_LOG_ERROR("No IP found for link between " << myId << " and " << peerIndex << ", skipping send");
         return;
     }
-    Ipv4Address peerIP = (myId == minId) ? it->second.second : it->second.first;
+    Ipv4Address peerIP = it->second.second;  // Get peer's IP on this link
+
+    NS_LOG_INFO("Node " << myId << " sending packet to node " << peerIndex << " at IP " << peerIP << " (density=" << density << ", timestamp=" << timestamp << ")");
 
     m_socket->SendTo(packet, 0, InetSocketAddress(peerIP, m_port));
 
@@ -767,7 +772,7 @@ void GossipApp::SendMessage(uint32_t peerIndex, uint32_t nodeId, uint32_t lastNo
     m_logFile << "send," << now << "," << GetNode()->GetId() << "," << peerIndex << ","
               << density << "," << timestamp << endl;
 
-    NS_LOG_INFO("Packet sent to node " << peerIndex << " at IP " << peerIP);
+    //NS_LOG_INFO("Packet sent to node " << peerIndex << " at IP " << peerIP);
 }
 
 
@@ -1094,10 +1099,10 @@ map<string, NetDeviceContainer>& pointToPointEther(NodeContainer& nodes){
 }
 
 
-void animationSetup(AnimationInterface& anim, NodeContainer camera, NodeContainer mobile){
-    for (uint8_t i = 0; i < mobile.GetN(); i++){
-        anim.UpdateNodeColor(mobile.Get(i), 0, 0, 255);
-    }
+void animationSetup(AnimationInterface& anim, NodeContainer camera){
+    // for (uint8_t i = 0; i < mobile.GetN(); i++){
+    //    anim.UpdateNodeColor(mobile.Get(i), 0, 0, 255);
+    //}
 
     for (uint8_t i = 0; i < camera.GetN(); i++){
         anim.UpdateNodeColor(camera.Get(i), 255, 0, 0);
@@ -1144,14 +1149,14 @@ int main(int argc, char *argv[])
 
     // Build network
     NodeContainer camera_nodes = CreateCameraNodes(nNodes);
-    NodeContainer mobile_nodes = CreateMobileNodes();
+    // NodeContainer mobile_nodes = CreateMobileNodes();
     NetDeviceContainer devices = WifiStack(camera_nodes);
 
     pointToPointEther(camera_nodes);
 
     InternetStackHelper internet;
     internet.Install(camera_nodes);
-    internet.Install(mobile_nodes);
+    // internet.Install(mobile_nodes);
 
     Ipv4AddressHelper address;
     map<uint32_t, Ipv4Address> nodeToIP;
@@ -1163,20 +1168,20 @@ int main(int argc, char *argv[])
         Ipv4InterfaceContainer interfaces = address.Assign(devices);
         subnetIndex++;
         
-        // Store IPs
-        try {
-            size_t dash = key.find('-');
-            uint32_t n1 = stoul(key.substr(0, dash));
-            uint32_t n2 = stoul(key.substr(dash + 1));
-            Ipv4Address ip1 = interfaces.GetAddress(0);
-            Ipv4Address ip2 = interfaces.GetAddress(1);
-            linkIPs[{n1, n2}] = {ip1, ip2};
-            linkIPs[{n2, n1}] = {ip2, ip1};
-        } catch (const exception& e) {
-            NS_LOG_ERROR("Failed to parse key " << key << " or assign IPs: " << e.what());
-        }
+        // Store IPs - use actual node IDs from devices,
+        uint32_t node0Id = devices.Get(0)->GetNode()->GetId();
+        uint32_t node1Id = devices.Get(1)->GetNode()->GetId();
+        Ipv4Address ip0 = interfaces.GetAddress(0);  // IP of node0
+        Ipv4Address ip1 = interfaces.GetAddress(1);  // IP of node1
+        
+        // Store both directions: when node0 sends to node1, peer IP is ip1
+        linkIPs[{node0Id, node1Id}] = {ip0, ip1};
+        linkIPs[{node1Id, node0Id}] = {ip1, ip0};
     }
     
+    // Populate routing tables so nodes can reach each other across subnets
+    Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+
     // Build IP mapping for gossip app
     for (uint32_t i = 0; i < camera_nodes.GetN(); ++i) {
         Ptr<Node> node = camera_nodes.Get(i);
@@ -1215,7 +1220,7 @@ int main(int argc, char *argv[])
     AnimationInterface anim("test-netanim.xml");
     anim.SetMaxPktsPerTraceFile(5000000);
     anim.EnablePacketMetadata();
-    animationSetup(anim, camera_nodes, mobile_nodes);
+    animationSetup(anim, camera_nodes);
 
     // Optionally stop simulation after e.g. 2 seconds
     Simulator::Stop(Seconds(simTime));

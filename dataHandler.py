@@ -1,8 +1,10 @@
 import pandas as pd
 import pickle
+from collections import Counter  # Add this import at the top if not already present
+import matplotlib.pyplot as plt
 
 nNodes = 50
-foldername = "2025-12-09_15-15-12"
+foldername = "2025-12-10_13-19-38"
 
 nodeData = []
 
@@ -45,10 +47,11 @@ def print_all_paths(paths):
 def get_path_lengths(paths):
     lengths = {}
     for path in paths:
-        send_to_value = int(path['node_to'].iloc[0])
-        if send_to_value not in lengths:
-            lengths[send_to_value] = []
-        lengths[send_to_value].append(len(path))
+        if not path.empty:
+            send_to_value = int(path['node_to'].iloc[0])
+            if send_to_value not in lengths:
+                lengths[send_to_value] = []
+            lengths[send_to_value].append(len(path)+1)
     return lengths
 
 genEvents = len(gen_list)  # Update to use gen_list length
@@ -66,4 +69,69 @@ else:
     with open(f"test/{foldername}/paths.pkl", "rb") as f:
         paths = pickle.load(f)
 
-print(paths[0:10])
+def get_average_path_length(lengths_dict):
+    averages = {}
+    for key, lengths_list in lengths_dict.items():
+        if lengths_list:
+            averages[key] = sum(lengths_list) / len(lengths_list)
+        else:
+            averages[key] = 0  # Or handle empty lists as needed
+    return averages
+
+def get_procentage_covered(average_lengths, total_nodes=nNodes):
+    procentages = {}
+    for key, avg_length in average_lengths.items():
+        procentages[key] = (avg_length / total_nodes) * 100
+    return procentages
+
+# Example usage: Compute averages for the lengths of the first 10 paths
+# lengths_for_first_10 = get_path_lengths(paths[0:10])
+# average_lengths = get_average_path_length(lengths_for_first_10)
+# print(f"Average path lengths per node_to for first 10: {average_lengths}")
+
+# Or for all paths
+lengths_all = get_path_lengths(paths)
+average_lengths_all = get_average_path_length(lengths_all)
+sorted_averages = dict(sorted(average_lengths_all.items()))
+#print(f"Average path lengths per node_to overall: {sorted_averages}")
+
+procentage_covered_all = get_procentage_covered(average_lengths_all)
+sorted_procentages = dict(sorted(procentage_covered_all.items()))
+# print(f"Procentage covered per node_to overall: {sorted_procentages}")
+
+# Combine all lengths and count frequencies
+def get_length_frequencies(lengths_dict):
+    all_lengths = []
+    for lengths_list in lengths_dict.values():
+        all_lengths.extend(lengths_list)
+    return dict(Counter(all_lengths))
+
+def get_procentage_for_succesfull_jump(length_frequencies):
+    total_paths = sum(length_frequencies.values())
+    cumulative = 0
+    succesfull_jumps = {'1': 100, '2': 100}  # 100% for length 1 and 2
+    for length, freq in length_frequencies.items():
+        succesfull_jumps[str(length - 1)] = ((total_paths - cumulative) / total_paths) * 100
+        cumulative += freq
+    return succesfull_jumps
+
+def plot_frequency_distribution(length_frequencies):
+
+    lengths = list(length_frequencies.keys())
+    frequencies = list(length_frequencies.values())
+
+    plt.bar(lengths, frequencies)
+    plt.xlabel('Path Length')
+    plt.ylabel('Frequency')
+    plt.title('Path Length Frequency Distribution')
+    plt.show()
+
+lengths_all = get_path_lengths(paths)
+frequencies = get_length_frequencies(lengths_all)
+sorted_frequencies = dict(sorted(frequencies.items()))
+procentage_jumps = get_procentage_for_succesfull_jump(sorted_frequencies)
+#print(sorted_frequencies)
+print(f"Procentage for successful jump: {procentage_jumps}")
+#print(f"Frequency of each path length: {sorted_frequencies}")
+plot_frequency_distribution(procentage_jumps)
+
