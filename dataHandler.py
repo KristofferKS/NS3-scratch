@@ -4,15 +4,16 @@ from collections import Counter  # Add this import at the top if not already pre
 import matplotlib.pyplot as plt
 
 nNodes = 50
-foldername = "2025-12-10_13-19-38"
+connections = 158
+foldername = "50-sim1"
 
 nodeData = []
 
 for i in range(nNodes):
-    df = pd.read_csv(f"test/{foldername}/gossip_log_node{i}.csv")
+    df = pd.read_csv(f"simulations/{foldername}/gossip_log_node{i}.csv")
     nodeData.append(df)
 
-totalData = pd.read_csv(f"test/{foldername}/final_knowledge.csv")
+totalData = pd.read_csv(f"simulations/{foldername}/final_knowledge.csv")
 
 
 combined_df = pd.concat(nodeData, ignore_index=True)
@@ -61,12 +62,12 @@ def get_paths_lengths():
 
 # only if paths.pkl does not exist
 import os
-if not os.path.exists(f"test/{foldername}/paths.pkl"):
+if not os.path.exists(f"simulations/{foldername}/paths.pkl"):
     paths = get_paths_lengths()
-    with open(f"test/{foldername}/paths.pkl", "wb") as f:
+    with open(f"simulations/{foldername}/paths.pkl", "wb") as f:
         pickle.dump(paths, f)
 else:
-    with open(f"test/{foldername}/paths.pkl", "rb") as f:
+    with open(f"simulations/{foldername}/paths.pkl", "rb") as f:
         paths = pickle.load(f)
 
 def get_average_path_length(lengths_dict):
@@ -123,8 +124,9 @@ def plot_frequency_distribution(length_frequencies):
     plt.bar(lengths, frequencies)
     plt.xlabel('Path Length')
     plt.ylabel('Frequency')
-    plt.title('Path Length Frequency Distribution')
-    plt.show()
+    plt.title(f'Path Length Frequency Distribution for {nNodes} Nodes')
+    plt.savefig(f'simulations/{foldername}/pathLengthFreqDist{nNodes}{connections}.png')
+    #plt.show()
 
 lengths_all = get_path_lengths(paths)
 frequencies = get_length_frequencies(lengths_all)
@@ -135,3 +137,20 @@ print(f"Procentage for successful jump: {procentage_jumps}")
 #print(f"Frequency of each path length: {sorted_frequencies}")
 plot_frequency_distribution(procentage_jumps)
 
+
+with pd.ExcelWriter(f'simulations/{foldername}/path_analysis_{nNodes}_{connections}.xlsx') as writer:
+    # Sheet 1: Average Path Lengths
+    avg_df = pd.DataFrame(list(sorted_averages.items()), columns=['Node', 'Average Path Length (Jumps)'])
+    avg_df.to_excel(writer, sheet_name='Average Path Lengths', index=False)
+    
+    # Sheet 2: Procentage Covered
+    perc_cov_df = pd.DataFrame(list(sorted_procentages.items()), columns=['Node', 'Average transmission Coverage (%)'])
+    perc_cov_df.to_excel(writer, sheet_name='Average Transmission Coverage', index=False)
+    
+    # Sheet 3: Length Frequencies
+    freq_df = pd.DataFrame([[1,0],[2,0]] + list(sorted_frequencies.items()), columns=['Jumps before transmission Death', 'quantity'])
+    freq_df.to_excel(writer, sheet_name='Point of Transmission Death', index=False)
+    
+    # Sheet 4: Procentage for Successful Jump
+    jump_df = pd.DataFrame(list(procentage_jumps.items()), columns=['Path Length', 'Probability for Successful Jump (%)'])
+    jump_df.to_excel(writer, sheet_name='Probability for Successful Jump', index=False)

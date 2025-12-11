@@ -1113,7 +1113,7 @@ void animationSetup(AnimationInterface& anim, NodeContainer camera){
 int main(int argc, char *argv[])
 {
     // Configuration parameters
-    uint32_t nNodes = 50;
+    uint32_t nNodes = 10;
     double commRange = 50.0;
     double simTime = 20;
     
@@ -1203,7 +1203,7 @@ int main(int argc, char *argv[])
     string timestamp = ss.str();
 
     // Create directory structure: test/YYYY-MM-DD_HH-MM-SS/
-    string logDir = "test/" + timestamp + "/";
+    string logDir = "simulations/50-sim1/";
     filesystem::create_directories(logDir);
 
     // Install gossip application with message generator
