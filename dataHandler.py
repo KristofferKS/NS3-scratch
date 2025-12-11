@@ -4,8 +4,9 @@ from collections import Counter  # Add this import at the top if not already pre
 import matplotlib.pyplot as plt
 
 nNodes = 50
-connections = 158
-foldername = "50-sim1"
+connections = 258
+foldername = "50-simidk"
+
 
 nodeData = []
 
@@ -62,14 +63,43 @@ def get_paths_lengths():
 
 # only if paths.pkl does not exist
 import os
+updates_grouped = updates_df.groupby(['node_from', 'timestamp_ms'])
+
+from multiprocessing import Pool
+
+def get_path_fast(gen_number):
+    gen_info = gen_list[gen_number]
+    message_id = gen_info['node_from']
+    timestamp_ms = gen_info['timestamp_ms']
+    
+    try:
+        stepByStep_df = updates_grouped.get_group((message_id, timestamp_ms))
+        stepByStep_df = stepByStep_df.sort_values(by='time', ignore_index=True)
+        return stepByStep_df
+    except KeyError:
+        return pd.DataFrame()
+
+def get_paths_lengths_parallel():
+    num_cores = os.cpu_count()
+    print(f"Using {num_cores} cores for parallel processing")
+    total = len(gen_list)
+    with Pool(num_cores) as pool:
+        paths = []
+        for i, path in enumerate(pool.imap(get_path_fast, range(total)), 1):
+            if i % 1000 == 0:
+                print(f"Processed {i}/{total} ({i/total*100:.1f}%)")
+            paths.append(path)
+    return paths
+
+genEvents = len(gen_list)
+
 if not os.path.exists(f"simulations/{foldername}/paths.pkl"):
-    paths = get_paths_lengths()
+    paths = get_paths_lengths_parallel()
     with open(f"simulations/{foldername}/paths.pkl", "wb") as f:
         pickle.dump(paths, f)
 else:
     with open(f"simulations/{foldername}/paths.pkl", "rb") as f:
         paths = pickle.load(f)
-
 def get_average_path_length(lengths_dict):
     averages = {}
     for key, lengths_list in lengths_dict.items():
@@ -128,29 +158,164 @@ def plot_frequency_distribution(length_frequencies):
     plt.savefig(f'simulations/{foldername}/pathLengthFreqDist{nNodes}{connections}.png')
     #plt.show()
 
+
+
 lengths_all = get_path_lengths(paths)
 frequencies = get_length_frequencies(lengths_all)
 sorted_frequencies = dict(sorted(frequencies.items()))
 procentage_jumps = get_procentage_for_succesfull_jump(sorted_frequencies)
+
+def save_csv_files():
+    # CSV 1: Average Path Lengths
+    avg_df = pd.DataFrame(
+        [(int(k), v) for k, v in sorted_averages.items()],
+        columns=['Node', 'Average Path Length (Jumps)']
+    )
+    avg_df.to_csv(f'simulations/{foldername}/avg_path_lengths.csv', index=False)
+    
+    # CSV 2: Procentage Covered
+    perc_cov_df = pd.DataFrame(
+        [(int(k), v) for k, v in sorted_procentages.items()],
+        columns=['Node', 'Average transmission Coverage (%)']
+    )
+    perc_cov_df.to_csv(f'simulations/{foldername}/avg_transmission_coverage.csv', index=False)
+    
+    # CSV 3: Length Frequencies
+    freq_df = pd.DataFrame(
+        [[1, 0], [2, 0]] + [(int(k), v) for k, v in sorted_frequencies.items()],
+        columns=['Jumps before transmission Death', 'quantity']
+    )
+    freq_df.to_csv(f'simulations/{foldername}/point_of_transmission_death.csv', index=False)
+    
+    # CSV 4: Procentage for Successful Jump
+    jump_df = pd.DataFrame(
+        [(int(k), v) for k, v in procentage_jumps.items()],
+        columns=['Path Length', 'Probability for Successful Jump (%)']
+    )
+    jump_df.to_csv(f'simulations/{foldername}/probability_successful_jump.csv', index=False)
+    
+    print(f"CSV files saved to simulations/{foldername}/")
+
+def save_xlsx_file():
+    with pd.ExcelWriter(f'simulations/{foldername}/path_analysis_{nNodes}_{connections}.xlsx') as writer:
+        # Sheet 1: Average Path Lengths (keys as integers)
+        avg_df = pd.DataFrame(
+            [(int(k), v) for k, v in sorted_averages.items()],
+            columns=['Node', 'Average Path Length (Jumps)']
+        )
+        avg_df.to_excel(writer, sheet_name='Average Path Lengths', index=False)
+        
+        # Sheet 2: Procentage Covered (keys as integers)
+        perc_cov_df = pd.DataFrame(
+            [(int(k), v) for k, v in sorted_procentages.items()],
+            columns=['Node', 'Average transmission Coverage (%)']
+        )
+        perc_cov_df.to_excel(writer, sheet_name='Average Transmission Coverage', index=False)
+        
+        # Sheet 3: Length Frequencies (keys as integers)
+        freq_df = pd.DataFrame(
+            [[1, 0], [2, 0]] + [(int(k), v) for k, v in sorted_frequencies.items()],
+            columns=['Jumps before transmission Death', 'quantity']
+        )
+        freq_df.to_excel(writer, sheet_name='Point of Transmission Death', index=False)
+        
+        # Sheet 4: Procentage for Successful Jump (keys as integers)
+        jump_df = pd.DataFrame(
+            [(int(k), v) for k, v in procentage_jumps.items()],
+            columns=['Path Length', 'Density ']
+        )
+        jump_df.to_excel(writer, sheet_name='Probability for Successful Jump', index=False)
+
+def save_xlsx_file_with_graphs():
+    with pd.ExcelWriter(f'simulations/{foldername}/path_analysis_{nNodes}_{connections}_withGraphs.xlsx', engine='xlsxwriter') as writer:
+        # Sheet 1: Average Path Lengths
+        avg_df = pd.DataFrame(
+            [(int(k), v) for k, v in sorted_averages.items()],
+            columns=['Node', 'Average Path Length (Jumps)']
+        )
+        avg_df.to_excel(writer, sheet_name='Average Path Lengths', index=False)
+        
+        # Add chart for Sheet 1
+        workbook = writer.book
+        worksheet = writer.sheets['Average Path Lengths']
+        chart1 = workbook.add_chart({'type': 'column'})
+        chart1.add_series({
+            'name': 'Average Path Length',
+            'categories': ['Average Path Lengths', 1, 0, len(avg_df), 0],
+            'values': ['Average Path Lengths', 1, 1, len(avg_df), 1],
+        })
+        chart1.set_title({'name': 'Average Path Length per Node'})
+        chart1.set_x_axis({'name': 'Node ID'})
+        chart1.set_y_axis({'name': 'Average Path Length (Jumps)'})
+        worksheet.insert_chart('D2', chart1)
+        
+        # Sheet 2: Percentage Covered
+        perc_cov_df = pd.DataFrame(
+            [(int(k), v) for k, v in sorted_procentages.items()],
+            columns=['Node', 'Average transmission Coverage (%)']
+        )
+        perc_cov_df.to_excel(writer, sheet_name='Average Transmission Coverage', index=False)
+        
+        # Add chart for Sheet 2
+        worksheet2 = writer.sheets['Average Transmission Coverage']
+        chart2 = workbook.add_chart({'type': 'column'})
+        chart2.add_series({
+            'name': 'Coverage %',
+            'categories': ['Average Transmission Coverage', 1, 0, len(perc_cov_df), 0],
+            'values': ['Average Transmission Coverage', 1, 1, len(perc_cov_df), 1],
+        })
+        chart2.set_title({'name': 'Transmission Coverage per Node'})
+        chart2.set_x_axis({'name': 'Node ID'})
+        chart2.set_y_axis({'name': 'Coverage (%)'})
+        worksheet2.insert_chart('D2', chart2)
+        
+        # Sheet 3: Length Frequencies
+        freq_df = pd.DataFrame(
+            [[1, 0], [2, 0]] + [(int(k), v) for k, v in sorted_frequencies.items()],
+            columns=['Jumps before transmission Death', 'quantity']
+        )
+        freq_df.to_excel(writer, sheet_name='Point of Transmission Death', index=False)
+        
+        # Add chart for Sheet 3
+        worksheet3 = writer.sheets['Point of Transmission Death']
+        chart3 = workbook.add_chart({'type': 'column'})
+        chart3.add_series({
+            'name': 'Frequency',
+            'categories': ['Point of Transmission Death', 1, 0, len(freq_df), 0],
+            'values': ['Point of Transmission Death', 1, 1, len(freq_df), 1],
+        })
+        chart3.set_title({'name': 'Path Length Frequency Distribution'})
+        chart3.set_x_axis({'name': 'Path Length (Jumps)'})
+        chart3.set_y_axis({'name': 'Frequency'})
+        worksheet3.insert_chart('D2', chart3)
+        
+        # Sheet 4: Probability for Successful Jump
+        jump_df = pd.DataFrame(
+            [(int(k), v) for k, v in procentage_jumps.items()],
+            columns=['Path Length', 'Probability for Successful Jump (%)']
+        )
+        jump_df.to_excel(writer, sheet_name='Probability for Successful Jump', index=False)
+        
+        # Add chart for Sheet 4 (line chart)
+        worksheet4 = writer.sheets['Probability for Successful Jump']
+        chart4 = workbook.add_chart({'type': 'line'})
+        chart4.add_series({
+            'name': 'Success Probability',
+            'categories': ['Probability for Successful Jump', 1, 0, len(jump_df), 0],
+            'values': ['Probability for Successful Jump', 1, 1, len(jump_df), 1],
+            'marker': {'type': 'circle'},
+        })
+        chart4.set_title({'name': 'Probability for Successful Jump vs Path Length'})
+        chart4.set_x_axis({'name': 'Path Length (Jumps)'})
+        chart4.set_y_axis({'name': 'Probability (%)'})
+        worksheet4.insert_chart('D2', chart4)
+    
+    print(f"Excel file with graphs saved!")
+
 #print(sorted_frequencies)
 print(f"Procentage for successful jump: {procentage_jumps}")
 #print(f"Frequency of each path length: {sorted_frequencies}")
 plot_frequency_distribution(procentage_jumps)
-
-
-with pd.ExcelWriter(f'simulations/{foldername}/path_analysis_{nNodes}_{connections}.xlsx') as writer:
-    # Sheet 1: Average Path Lengths
-    avg_df = pd.DataFrame(list(sorted_averages.items()), columns=['Node', 'Average Path Length (Jumps)'])
-    avg_df.to_excel(writer, sheet_name='Average Path Lengths', index=False)
-    
-    # Sheet 2: Procentage Covered
-    perc_cov_df = pd.DataFrame(list(sorted_procentages.items()), columns=['Node', 'Average transmission Coverage (%)'])
-    perc_cov_df.to_excel(writer, sheet_name='Average Transmission Coverage', index=False)
-    
-    # Sheet 3: Length Frequencies
-    freq_df = pd.DataFrame([[1,0],[2,0]] + list(sorted_frequencies.items()), columns=['Jumps before transmission Death', 'quantity'])
-    freq_df.to_excel(writer, sheet_name='Point of Transmission Death', index=False)
-    
-    # Sheet 4: Procentage for Successful Jump
-    jump_df = pd.DataFrame(list(procentage_jumps.items()), columns=['Path Length', 'Probability for Successful Jump (%)'])
-    jump_df.to_excel(writer, sheet_name='Probability for Successful Jump', index=False)
+save_xlsx_file()
+#save_xlsx_file_with_graphs()
+#save_csv_files()

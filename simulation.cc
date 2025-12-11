@@ -911,7 +911,7 @@ void SetCameraMobility(uint8_t node, NodeContainer& camera_nodes) {
     NS_LOG_INFO("Placing camera nodes with coverage constraints");
     
     // Path to the directory
-    const char* node_file = "scratch/placement.json";
+    const char* node_file = "scratch/placement_50_32.json";
 
     // Structure which would store the metadata
     struct stat sb;
@@ -1036,8 +1036,8 @@ NetDeviceContainer WifiStack(NodeContainer& nodes){
 
 map<string, NetDeviceContainer>& pointToPointEther(NodeContainer& nodes){
     // Find the neighbor within communication range from placement.json
-    const char* file = "scratch/placement.json";
-    double commRange = 50.0;
+    const char* file = "scratch/placement_50_32.json";
+    double commRange = 70.0;
 
     // Call Python script to calculate neighbors
     string command = "python3 scratch/calculate_neighbors.py " + to_string((int)commRange) + " " + file + " neighbors.json";
@@ -1203,7 +1203,7 @@ int main(int argc, char *argv[])
     string timestamp = ss.str();
 
     // Create directory structure: test/YYYY-MM-DD_HH-MM-SS/
-    string logDir = "simulations/50-sim1/";
+    string logDir = "simulationsProb/" + to_string(percentage) + "/";
     filesystem::create_directories(logDir);
 
     // Install gossip application with message generator
