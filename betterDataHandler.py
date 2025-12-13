@@ -7,7 +7,7 @@ import re
 from multiprocessing import Pool
 
 nNodes = 50
-folder_name = 'simulationsProb'
+folder_name = 'test/Temp_test'
 
 # Global variables for multiprocessing
 _gen_list = None
@@ -39,15 +39,27 @@ def get_connections_from_folder(folder_name):
         return float(match.group(1))
     return None
 
-def process_folder(foldername):
-    """Process a single simulation folder and return the probability jumps data and coverage"""
-    print(f"\nProcessing folder: {foldername}")
+def process_folder(foldername, total, current):
+    """Process a single simulation folder and return the probability jumps data, coverage, and drop rate"""
+    print(f"\nProcessing folder: {foldername} | {current}/{total}")
     
     # Extract connection number from folder name
     connections = get_connections_from_folder(foldername)
     if connections is None:
         print(f"Warning: Could not extract connection number from {foldername}")
         connections = 0
+    
+    # Check if cached metrics exist
+    metrics_cache_path = f"{folder_name}/{foldername}/metrics_cache.pkl"
+    if os.path.exists(metrics_cache_path):
+        print(f"Loading cached metrics from {metrics_cache_path}")
+        with open(metrics_cache_path, "rb") as f:
+            cached_metrics = pickle.load(f)
+        return (cached_metrics['procentage_jumps'], 
+                cached_metrics['percentage_covered'], 
+                cached_metrics['drop_rate'], 
+                cached_metrics['avg_coverage'], 
+                connections)
     
     nodeData = []
     
@@ -56,11 +68,24 @@ def process_folder(foldername):
         csv_path = f"{folder_name}/{foldername}/gossip_log_node{i}.csv"
         if not os.path.exists(csv_path):
             print(f"Warning: {csv_path} not found, skipping folder")
-            return None, None, connections
+            return None, None, None, None, connections
         df = pd.read_csv(csv_path)
         nodeData.append(df)
     
     combined_df = pd.concat(nodeData, ignore_index=True)
+    
+    # Calculate drop rate from combined data
+    total_send_events = len(combined_df[combined_df['event'] == 'send'])
+    total_drop_events = len(combined_df[combined_df['event'] == 'drop'])
+    
+    if total_send_events > 0:
+        drop_rate = (total_drop_events / total_send_events) * 100
+    else:
+        drop_rate = 0
+    
+    print(f"  Total send events: {total_send_events}")
+    print(f"  Total drop events: {total_drop_events}")
+    print(f"  Drop rate: {drop_rate:.2f}%")
     
     # Precompute gen info and group updates
     gen_df = combined_df[combined_df['event'] == 'gen']
@@ -159,13 +184,30 @@ def process_folder(foldername):
     average_lengths = get_average_path_length(lengths_all)
     print("Calculating coverage...")
     percentage_covered = get_percentage_covered(average_lengths)
+    
+    # Calculate average coverage across all nodes
+    avg_coverage = sum(percentage_covered.values()) / len(percentage_covered)
+    print(f"  Average coverage: {avg_coverage:.2f}%")
+    
     print("Calculating frequencies...")
     frequencies = get_length_frequencies(lengths_all)
     sorted_frequencies = dict(sorted(frequencies.items()))
     print("Calculating jump probabilities...")
     procentage_jumps = get_procentage_for_succesfull_jump(sorted_frequencies)
     
-    return procentage_jumps, percentage_covered, connections
+    # Cache all computed metrics
+    metrics = {
+        'procentage_jumps': procentage_jumps,
+        'percentage_covered': percentage_covered,
+        'drop_rate': drop_rate,
+        'avg_coverage': avg_coverage
+    }
+    
+    print(f"Saving metrics cache to {metrics_cache_path}")
+    with open(metrics_cache_path, "wb") as f:
+        pickle.dump(metrics, f)
+    
+    return procentage_jumps, percentage_covered, drop_rate, avg_coverage, connections
 
 def create_combined_excel():
     """Create Excel file with combined data from all simulation folders"""
@@ -192,13 +234,20 @@ def create_combined_excel():
     # Process all folders
     all_jump_data = {}
     all_coverage_data = {}
+    all_drop_rates = {}
+    all_avg_coverage = {}
     folder_connections = {}
     
+    folder_amount = len(sim_folders)
+    folders_started = 1
     for folder in sim_folders:
-        procentage_jumps, percentage_covered, connections = process_folder(folder)
+        procentage_jumps, percentage_covered, drop_rate, avg_coverage, connections = process_folder(folder,folder_amount,folders_started)
+        folders_started += 1
         if procentage_jumps is not None:
             all_jump_data[folder] = procentage_jumps
             all_coverage_data[folder] = percentage_covered
+            all_drop_rates[folder] = drop_rate
+            all_avg_coverage[folder] = avg_coverage
             folder_connections[folder] = connections
     
     if not all_jump_data:
@@ -244,8 +293,29 @@ def create_combined_excel():
     
     coverage_df = pd.DataFrame(coverage_data)
     
+    # Create DataFrame for Coverage/Drop Rate Ratio (Sheet 3)
+    ratio_data = {
+        'Gossip Probability (%)': [folder_connections[folder] * 100 for folder in sorted_folders],
+        'Average Coverage (%)': [all_avg_coverage[folder] for folder in sorted_folders],
+        'Drop Rate (%)': [all_drop_rates[folder] for folder in sorted_folders],
+    }
+    
+    # Calculate ratio (handle division by zero)
+    ratios = []
+    for folder in sorted_folders:
+        coverage = all_avg_coverage[folder]
+        drop_rate = all_drop_rates[folder]
+        if drop_rate > 0:
+            ratio = coverage / drop_rate
+        else:
+            ratio = coverage  # If no drops, ratio is just coverage
+        ratios.append(ratio)
+    
+    ratio_data['Coverage/Drop Rate Ratio'] = ratios
+    ratio_df = pd.DataFrame(ratio_data)
+    
     # Save to Excel with graphs
-    output_file = f'{folder_name}/combined_analysis.xlsx'
+    output_file = f'{folder_name}/combined_analysis4.xlsx'
     
     with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
         # Sheet 1: Probability Comparison
@@ -310,9 +380,48 @@ def create_combined_excel():
         chart2.set_legend({'position': 'right'})
         
         worksheet2.insert_chart('E2', chart2)
+        
+        # Sheet 3: Coverage/Drop Rate Ratio
+        ratio_df.to_excel(writer, sheet_name='Efficiency Analysis', index=False)
+        
+        worksheet3 = writer.sheets['Efficiency Analysis']
+        
+        # Create line chart for efficiency ratio
+        chart3 = workbook.add_chart({'type': 'line'})
+        
+        chart3.add_series({
+            'name': 'Coverage/Drop Rate Ratio',
+            'categories': ['Efficiency Analysis', 1, 0, len(sorted_folders), 0],
+            'values': ['Efficiency Analysis', 1, 3, len(sorted_folders), 3],
+            'marker': {'type': 'circle', 'size': 7},
+            'line': {'width': 2.5},
+        })
+        
+        chart3.set_title({'name': 'Gossip Efficiency: Coverage/Drop Rate Ratio',
+                         'name_font': {'size': 20, 'bold': False}})
+        chart3.set_x_axis({'name': 'Gossip Probability (%)',
+                          'name_font': {'size': 14, 'bold': False}})
+        chart3.set_y_axis({'name': 'Coverage / Drop Rate Ratio',
+                          'name_font': {'size': 14, 'bold': False}})
+        chart3.set_size({'width': 720, 'height': 480})
+        chart3.set_legend({'position': 'none'})
+        
+        worksheet3.insert_chart('F2', chart3)
     
     print(f"\nCombined analysis saved to {output_file}")
     print(f"Processed {len(all_jump_data)} folders: {sorted_folders}")
+    
+    # Print summary
+    print("\n=== Efficiency Summary ===")
+    for folder in sorted_folders:
+        prob = folder_connections[folder] * 100
+        coverage = all_avg_coverage[folder]
+        drop_rate = all_drop_rates[folder]
+        if drop_rate > 0:
+            ratio = coverage / drop_rate
+        else:
+            ratio = coverage
+        print(f"Gossip {prob}%: Coverage={coverage:.2f}%, Drop Rate={drop_rate:.2f}%, Ratio={ratio:.2f}")
 
 # Run the combined analysis
 if __name__ == "__main__":
