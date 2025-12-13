@@ -737,11 +737,34 @@ void PlaceNodes(NodeContainer& nodes, uint32_t nNodes, double radius) {
 }
 
 // NETWORK SETUP
-NetDeviceContainer SetupWifi(NodeContainer& nodes) {
-    // WiFi PHY
-    YansWifiChannelHelper channel = YansWifiChannelHelper::Default();
+NetDeviceContainer SetupWifi(NodeContainer& nodes, double pathLossExponent) {
+    YansWifiChannelHelper channel;
+    
+    if (pathLossExponent > 0) {
+        // Forest/festival propagation model
+        // Log-distance with configurable exponent for outdoor with foliage/crowd
+        // Reference loss ~46 dB at 1m (standard 2.4 GHz outdoor)
+        channel.SetPropagationDelay("ns3::ConstantSpeedPropagationDelayModel");
+        channel.AddPropagationLoss("ns3::LogDistancePropagationLossModel",
+                                   "Exponent", DoubleValue(pathLossExponent),
+                                   "ReferenceLoss", DoubleValue(46.0));
+        channel.AddPropagationLoss("ns3::NakagamiPropagationLossModel",
+                                   "m0", DoubleValue(1.0),   // Rayleigh fading (NLOS)
+                                   "m1", DoubleValue(1.0),
+                                   "m2", DoubleValue(1.0));
+        NS_LOG_INFO("Using LogDistance + Nakagami propagation, exponent=" << pathLossExponent);
+    } else {
+        // Default YansWifiChannelHelper (LogDistance exponent=3, no fading)
+        channel = YansWifiChannelHelper::Default();
+        NS_LOG_INFO("Using default YansWifiChannelHelper propagation");
+    }
+    
     YansWifiPhyHelper phy;
     phy.SetChannel(channel.Create());
+    
+    // TX power: 20 dBm (~100 mW) - typical for outdoor ad-hoc scenario
+    phy.Set("TxPowerStart", DoubleValue(20.0));
+    phy.Set("TxPowerEnd", DoubleValue(20.0));
     
     // WiFi MAC
     WifiHelper wifi;
@@ -784,6 +807,8 @@ int main(int argc, char* argv[]) {
     float deltaDensity = 15.0f;
     double minInterval = 1.0;
     double maxInterval = 3.0;
+    double pathLossExponent = 3.3;  // 0 or negative = use default Friis
+    std::string runName = "";      // Optional run name for log directory
     
     // Command line
     CommandLine cmd;
@@ -796,17 +821,30 @@ int main(int argc, char* argv[]) {
     cmd.AddValue("deltaDensity", "Maximum density change per step", deltaDensity);
     cmd.AddValue("minInterval", "Minimum message interval (s)", minInterval);
     cmd.AddValue("maxInterval", "Maximum message interval (s)", maxInterval);
+    cmd.AddValue("pathLossExp", "Path loss exponent (0 = default Friis)", pathLossExponent);
+    cmd.AddValue("runName", "Custom name for this run (optional)", runName);
     cmd.Parse(argc, argv);
     
     // Enable logging
     LogComponentEnable("GossipSimulation", LOG_LEVEL_INFO);
     
-    // Create log directory with timestamp
-    auto now = std::chrono::system_clock::now();
-    auto time = std::chrono::system_clock::to_time_t(now);
-    //std::stringstream ss;
-    //ss << std::put_time(std::localtime(&time), "%Y-%m-%d_%H-%M-%S");
-    std::string logDir = "simWifi/latencyOverhead/";
+    // Create log directory with meaningful name
+    std::string logDir;
+    if (!runName.empty()) {
+        logDir = "simWifi/" + runName + "/";
+    } else {
+        // Auto-generate name from parameters
+        std::stringstream ss;
+        ss << "simWifi/";
+        if (pathLossExponent > 0) {
+            ss << "exp" << std::fixed << std::setprecision(1) << pathLossExponent;
+        } else {
+            ss << "default";
+        }
+        ss << "_gr" << std::fixed << std::setprecision(1) << gossipRatio;
+        ss << "_t" << (int)simTime << "s/";
+        logDir = ss.str();
+    }
     std::filesystem::create_directories(logDir);
     
     std::cout << "Log directory: " << logDir << "\n";
@@ -819,7 +857,7 @@ int main(int argc, char* argv[]) {
     PlaceNodes(nodes, nNodes, 200.0);
     
     // Setup WiFi
-    NetDeviceContainer devices = SetupWifi(nodes);
+    NetDeviceContainer devices = SetupWifi(nodes, pathLossExponent);
     
     // Install Internet stack
     InternetStackHelper internet;
@@ -861,6 +899,8 @@ int main(int argc, char* argv[]) {
     configFile << "Density Range: [" << minDensity << ", " << maxDensity << "]\n";
     configFile << "Delta Density: " << deltaDensity << "\n";
     configFile << "Message Interval: [" << minInterval << ", " << maxInterval << "] s\n";
+    configFile << "Path Loss Exponent: " << (pathLossExponent > 0 ? std::to_string(pathLossExponent) : "default (LogDistance exp=3)") << "\n";
+    configFile << "TX Power: 20 dBm\n";
     configFile.close();
     
     // Run simulation
